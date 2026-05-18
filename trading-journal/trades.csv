@@ -1,0 +1,1 @@
+trade_id,date,market_score,sector,stock_name,stock_code,logic_level,logic_summary,fund_status,sentiment_status,stock_score,buy_model,buy_reason,buy_price,buy_amount,position_pct,stop_loss_price,planned_max_loss_pct,sell_date,sell_price,sell_reason,pnl_amount,pnl_pct,followed_system,error_type,notes
