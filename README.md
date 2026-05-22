@@ -1,14 +1,14 @@
 # 交易系统
 
-> 本文档已拆分为可查询的规则库、可执行的操作手册、复盘模板、案例和附录。
+> 本文档已拆分为唯一规则源、执行清单、复盘模板、案例和附录。
 
 ## 快速入口
 
 | 文件 | 用途 |
 |------|------|
-| [trading-system/trading-reference.md](trading-system/trading-reference.md) | 查询完整规则、评分标准、买卖点模型、仓位和风控规则 |
-| [trading-system/trading-playbook.md](trading-system/trading-playbook.md) | 盘前、盘中、买入前、卖出、暂停的执行清单 |
-| [trading-system/review-templates.md](trading-system/review-templates.md) | 每日、每周、每 15 笔/月度复盘模板 |
+| [trading-system/trading-reference.md](trading-system/trading-reference.md) | 唯一规则源，查询完整规则、评分标准、买卖点模型、仓位和风控规则 |
+| [trading-system/trading-playbook.md](trading-system/trading-playbook.md) | 执行清单，不定义规则 |
+| [trading-system/review-templates.md](trading-system/review-templates.md) | 每日、每周和定期复盘模板 |
 | [trading-system/examples/low-volume-breakout.md](trading-system/examples/low-volume-breakout.md) | 低位放量突破完整案例 |
 | [trading-system/appendices/quantitative-standards.md](trading-system/appendices/quantitative-standards.md) | 量化参考标准速查表 |
 | [trading-system/appendices/human-vs-quant.md](trading-system/appendices/human-vs-quant.md) | 个人交易与量化交易的边界 |
@@ -32,6 +32,7 @@
 量价定买点
 位置看赔率
 风控保生存
+成本先估算
 复盘做迭代
 ```
 
@@ -44,6 +45,7 @@
 4. 个股是板块内强者
 5. 买点位置赔率合理
 6. 错了有明确退出点
+7. 风险预算和交易成本已提前算清
 ```
 
 第一原则：
