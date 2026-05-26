@@ -8,8 +8,6 @@
 |------|------|
 | [docs/trading-system/trading-reference.md](docs/trading-system/trading-reference.md) | 核心执行版，定义交易准入、主线判断、买点、仓位、卖出、暂停、成本和复盘边界 |
 | [docs/trading-system/trading-templates.md](docs/trading-system/trading-templates.md) | 盘前、盘中、买入前、卖出后、复盘记录模板 |
-| [docs/tushare-news/README.md](docs/tushare-news/README.md) | Tushare 资讯抓取说明 |
-| [data/tushare-news/README.md](data/tushare-news/README.md) | Tushare 资讯抓取归档索引 |
 
 ## 常用命令
 
