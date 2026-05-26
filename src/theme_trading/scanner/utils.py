@@ -36,3 +36,73 @@ def _prev_n_avg(df: pd.DataFrame, col: str, n: int) -> float | None:
     if df is None or len(df) < n:
         return None
     return float(df.sort_values("trade_date")[col].tail(n).mean())
+
+
+def _rolling_ma_series(values: pd.Series, window: int) -> pd.Series:
+    return values.astype(float).rolling(window, min_periods=window).mean()
+
+
+def _recent_ratio_flags(df: pd.DataFrame, col: str, window: int, ratio: float, days: int, above: bool = True) -> list[bool]:
+    if df is None or len(df) < window + days - 1 or col not in df.columns:
+        return []
+    ordered = df.sort_values("trade_date").copy()
+    ma = _rolling_ma_series(ordered[col], window)
+    checks = []
+    for idx in ordered.tail(days).index:
+        avg = ma.loc[idx]
+        value = float(ordered.loc[idx, col])
+        if pd.isna(avg) or avg <= 0:
+            return []
+        checks.append(value >= avg * ratio if above else value < avg * ratio)
+    return checks
+
+
+def _recent_all_ratio(df: pd.DataFrame, col: str, window: int, ratio: float, days: int, above: bool = True) -> bool | None:
+    checks = _recent_ratio_flags(df, col, window, ratio, days, above)
+    return all(checks) if len(checks) == days else None
+
+
+def _rank_map(df: pd.DataFrame, value_col: str, ascending: bool = False) -> dict:
+    if df is None or df.empty or value_col not in df.columns:
+        return {}
+    ranked = df.copy()
+    ranked[value_col] = ranked[value_col].astype(float)
+    ranked["_rank"] = ranked[value_col].rank(ascending=ascending, method="min")
+    return dict(zip(ranked["ts_code"], ranked["_rank"].astype(int)))
+
+
+def _top_percent_threshold(size: int, pct: float) -> int:
+    return max(1, int(np.ceil(size * pct)))
+
+
+def _is_above_ma_stack(close: float, ma5: float | None, ma10: float | None, ma20: float | None) -> bool:
+    mas = [ma5, ma10, ma20]
+    return all(ma is not None and not np.isnan(ma) and close > ma for ma in mas)
+
+
+def _check_open_gap(confirm_close: float, next_open: float | None, limit: float = 0.03) -> dict:
+    if next_open is None or confirm_close <= 0:
+        return {"checked": False, "passed": None, "gap_pct": None}
+    gap_pct = next_open / confirm_close - 1
+    return {"checked": True, "passed": abs(gap_pct) <= limit, "gap_pct": round(float(gap_pct), 4)}
+
+
+BUY_POINT_PRIORITY = {
+    "买点一_放量突破": 1,
+    "买点三_突破确认": 2,
+    "买点二_主升回踩": 3,
+    "买点四_趋势均线": 4,
+}
+
+
+def _select_highest_priority_buy_point(buy_points: dict) -> tuple[str | None, list[str]]:
+    triggered = [name for name, info in buy_points.items() if info.get("triggered") or info.get("setup_triggered")]
+    if not triggered:
+        return None, []
+    selected = sorted(triggered, key=lambda name: BUY_POINT_PRIORITY.get(name, 99))[0]
+    suppressed = [name for name in triggered if name != selected]
+    return selected, suppressed
+
+
+def _amount_col(df: pd.DataFrame) -> str:
+    return "amount" if df is not None and "amount" in df.columns else "vol"

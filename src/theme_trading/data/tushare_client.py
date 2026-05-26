@@ -14,6 +14,8 @@ _ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 load_dotenv(_ENV_FILE)
 
 MIN_INTERVAL = 0.6
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 1.0
 _last_call: float = 0.0
 
 
@@ -56,21 +58,27 @@ def get_pro():
 
 
 def safe_query(fn):
-    """装饰器：自动 rate limit + 异常转 None"""
+    """装饰器：自动 rate limit + 失败重试 + 异常转 None"""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        _rate_limit()
-        try:
-            result = fn(*args, **kwargs)
-            if result is None or (isinstance(result, pd.DataFrame) and len(result) == 0):
-                return None
-            return result
-        except TushareConfigError:
-            raise
-        except Exception as e:
-            print(f"[tushare] {fn.__name__} 查询失败: {e}")
-            return None
+        for attempt in range(1, MAX_RETRIES + 1):
+            _rate_limit()
+            try:
+                result = fn(*args, **kwargs)
+                if result is None or (isinstance(result, pd.DataFrame) and len(result) == 0):
+                    return None
+                return result
+            except TushareConfigError:
+                raise
+            except Exception as e:
+                if attempt >= MAX_RETRIES:
+                    print(f"[tushare] {fn.__name__} 查询失败: {e}; args={args}, kwargs={kwargs}")
+                    return None
+                wait = RETRY_BACKOFF_SECONDS * attempt
+                print(f"[tushare] {fn.__name__} 第 {attempt}/{MAX_RETRIES} 次查询失败，{wait:.0f}s 后重试: {e}")
+                time.sleep(wait)
+        return None
 
     return wrapper
 

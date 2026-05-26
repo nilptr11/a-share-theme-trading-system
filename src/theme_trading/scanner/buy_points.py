@@ -1,225 +1,372 @@
 """买点扫描。"""
 
+from datetime import datetime, timedelta
+
 import numpy as np
 
 from theme_trading.data.market_data import fetch_daily
 
-from .utils import _ma, _n_days_ago
+from .constants import (
+    BREAKOUT_AMOUNT_RATIO,
+    BREAKOUT_CONFIRM_RATIO,
+    BUY_POINT_4_MAX_GAIN_20D,
+    NEXT_OPEN_GAP_LIMIT,
+    PULLBACK_AMOUNT_MA5_RATIO,
+    PULLBACK_AMOUNT_PREV_RATIO,
+    REBOUND_AMOUNT_RATIO,
+    STOP_LOSS_RATIO,
+)
+from .utils import BUY_POINT_PRIORITY, _check_open_gap, _ma, _n_days_ago, _select_highest_priority_buy_point
 
 
-def scan_buy_points(ts_code: str, trade_date: str) -> dict:
-    """对单只个股扫描四个买点条件
+def _n_days_after(date_str: str, n: int) -> str:
+    return (datetime.strptime(date_str, "%Y%m%d") + timedelta(days=n)).strftime("%Y%m%d")
 
-    返回每个买点的满足情况和详细指标。
-    确认日 = trade_date
-    """
-    # 获取近 60 日数据
-    start = _n_days_ago(trade_date, 70)
-    df = fetch_daily(ts_code=ts_code, start_date=start, end_date=trade_date)
+
+def _empty_point(priority: int, manual_checks: list[str] | None = None) -> dict:
+    return {
+        "triggered": False,
+        "setup_triggered": False,
+        "status": "not_triggered",
+        "priority": priority,
+        "details": {},
+        "stop_loss": None,
+        "execution_check": {},
+        "failure_signals": [],
+        "manual_checks": manual_checks or [],
+    }
+
+
+def _execution_check(confirm_close: float, next_row) -> dict:
+    next_open = float(next_row["open"]) if next_row is not None and "open" in next_row else None
+    gap = _check_open_gap(confirm_close, next_open, NEXT_OPEN_GAP_LIMIT)
+    return {
+        "confirm_close": round(float(confirm_close), 2),
+        "next_trade_date": next_row.get("trade_date") if next_row is not None else None,
+        "next_open": round(next_open, 2) if next_open is not None else None,
+        "gap_limit_pct": NEXT_OPEN_GAP_LIMIT,
+        "gap_check": gap,
+        "rule": "次日开盘价相对确认日收盘价在 ±3% 内才可执行",
+    }
+
+
+def _next_strength_ok(next_row, base_amount: float) -> bool | None:
+    if next_row is None:
+        return None
+    if "close" not in next_row or "open" not in next_row or "amount" not in next_row:
+        return None
+    return bool(float(next_row["close"]) > float(next_row["open"]) and float(next_row["amount"]) >= base_amount * REBOUND_AMOUNT_RATIO)
+
+
+def _consecutive_drops(closes: np.ndarray, today: int, max_days: int = 5) -> int:
+    drops = 0
+    for i in range(today, max(today - max_days, 0), -1):
+        if closes[i] < closes[i - 1]:
+            drops += 1
+        else:
+            break
+    return drops
+
+
+def _near_ma_in_pullback(closes: np.ndarray, ma_values: np.ndarray, today: int, drops: int, tolerance: float = 0.01) -> bool:
+    if drops < 2:
+        return False
+    start = max(today - drops + 1, 0)
+    for i in range(start, today + 1):
+        if not np.isnan(ma_values[i]) and ma_values[i] > 0 and abs(closes[i] - ma_values[i]) / ma_values[i] <= tolerance:
+            return True
+    return False
+
+
+def _pullback_has_volume_down(closes: np.ndarray, amounts: np.ndarray, amount_ma5: np.ndarray, today: int, drops: int) -> bool:
+    start = max(today - drops + 1, 0)
+    for i in range(start, today + 1):
+        if closes[i] < closes[i - 1] and not np.isnan(amount_ma5[i]) and amounts[i] >= amount_ma5[i] * 1.2:
+            return True
+    return False
+
+
+def _status_for_setup(setup: bool, next_row, confirm_close: float, needs_strength: bool, strength_ok: bool | None, blocked: bool = False) -> tuple[bool, str, dict]:
+    execution = _execution_check(confirm_close, next_row)
+    gap = execution["gap_check"]
+    if not setup:
+        return False, "not_triggered", execution
+    if blocked:
+        return False, "watch", execution
+    if gap["checked"] and not gap["passed"]:
+        return False, "invalid", execution
+    if needs_strength:
+        if strength_ok is None:
+            return False, "pending_next_day_strength", execution
+        return strength_ok, "executable_plan" if strength_ok else "invalid", execution
+    if not gap["checked"]:
+        return True, "pending_next_open", execution
+    return True, "executable_plan", execution
+
+
+def scan_buy_points(
+    ts_code: str,
+    trade_date: str,
+    market_context: dict | None = None,
+    sector_context: dict | None = None,
+    core_context: dict | None = None,
+) -> dict:
+    """对单只个股扫描四个买点条件。"""
+    start = _n_days_ago(trade_date, 90)
+    end = _n_days_after(trade_date, 10)
+    df = fetch_daily(ts_code=ts_code, start_date=start, end_date=end)
     if df is None or len(df) < 25:
         return {"ok": False, "error": "数据不足"}
 
     df = df.sort_values("trade_date").reset_index(drop=True)
-    closes = df["close"].values
-    highs = df["high"].values
-    lows = df["low"].values
-    vols = df["vol"].values
-    amounts = df["amount"].values
+    confirm_matches = df.index[df["trade_date"] == trade_date].tolist()
+    if not confirm_matches:
+        return {"ok": False, "error": "确认日无行情数据"}
 
-    # 均线
+    today = confirm_matches[0]
+    if today < 24:
+        return {"ok": False, "error": "确认日前历史数据不足"}
+
+    next_row = df.iloc[today + 1] if today + 1 < len(df) else None
+    hist = df.iloc[:today + 1].copy()
+    closes = hist["close"].astype(float).values
+    highs = hist["high"].astype(float).values
+    lows = hist["low"].astype(float).values
+    amounts = hist["amount"].astype(float).values
+
     ma5 = _ma(closes, 5)
     ma10 = _ma(closes, 10)
     ma20 = _ma(closes, 20)
-    vol_ma5 = _ma(vols, 5)
+    amount_ma5 = _ma(amounts, 5)
+    idx = len(closes) - 1
 
-    today = len(closes) - 1
-    prev = today - 1
+    common_manual = []
+    if market_context is None:
+        common_manual.append("缺少市场上下文，市场评分需由外层流程确认")
+    if sector_context is None:
+        common_manual.append("缺少板块上下文，主线和板块同步需人工确认")
+    if core_context is None:
+        common_manual.append("缺少核心股上下文，核心强势股身份需人工确认")
 
     result = {
+        "ok": True,
         "ts_code": ts_code,
         "trade_date": trade_date,
-        "close": float(closes[today]),
-        "ma5": float(ma5[today]) if not np.isnan(ma5[today]) else None,
-        "ma10": float(ma10[today]) if not np.isnan(ma10[today]) else None,
-        "ma20": float(ma20[today]) if not np.isnan(ma20[today]) else None,
-        "vol_ratio": float(vols[today] / vol_ma5[today]) if not np.isnan(vol_ma5[today]) and vol_ma5[today] > 0 else None,
+        "confirm_date": trade_date,
+        "close": float(closes[idx]),
+        "ma5": float(ma5[idx]) if not np.isnan(ma5[idx]) else None,
+        "ma10": float(ma10[idx]) if not np.isnan(ma10[idx]) else None,
+        "ma20": float(ma20[idx]) if not np.isnan(ma20[idx]) else None,
+        "amount_today": float(amounts[idx]),
+        "amount_ma5": float(amount_ma5[idx]) if not np.isnan(amount_ma5[idx]) else None,
+        "amount_ratio": float(amounts[idx] / amount_ma5[idx]) if not np.isnan(amount_ma5[idx]) and amount_ma5[idx] > 0 else None,
         "buy_points": {},
+        "manual_checks": common_manual,
     }
+
+    sector_pct = sector_context.get("pct_chg") if sector_context else None
+    sector_amount_ratio = sector_context.get("amount_ratio") or sector_context.get("vol_ratio") if sector_context else None
+    emotion_extreme = bool(market_context.get("emotion_extreme")) if market_context else False
 
     # ── 买点一：低位放量突破 ──
-    bp1_ok = False
-    bp1_details = {}
+    bp1 = _empty_point(BUY_POINT_PRIORITY["买点一_放量突破"], common_manual.copy())
+    recent_5_high = float(np.max(highs[-6:-1]))
+    recent_5_low = float(np.min(lows[-6:-1]))
+    range_pct = (recent_5_high - recent_5_low) / recent_5_low if recent_5_low > 0 else 1.0
+    is_consolidating = range_pct <= 0.05
+    high_20 = float(np.max(highs[-21:-1]))
+    is_breakout = closes[idx] > high_20
+    amount_ok = amounts[idx] >= amount_ma5[idx] * BREAKOUT_AMOUNT_RATIO if not np.isnan(amount_ma5[idx]) else False
+    close_confirm = closes[idx] >= high_20 * BREAKOUT_CONFIRM_RATIO
+    sector_follow = sector_pct is None or sector_pct >= 1.0
+    if sector_pct is None:
+        bp1["manual_checks"].append("买点一板块当日涨幅 ≥ 1% 需人工确认")
 
-    # 近 5 日横盘整理（最高最低差 ≤ 3%）
-    if len(closes) >= 10:
-        recent_5_high = np.max(highs[-6:-1])  # 前 5 天
-        recent_5_low = np.min(lows[-6:-1])
-        range_pct = (recent_5_high - recent_5_low) / recent_5_low if recent_5_low > 0 else 1.0
-        bp1_details["consolidation_5d_range"] = round(float(range_pct), 3)
-        is_consolidating = range_pct <= 0.05  # 振幅 ≤ 5% 视为横盘
-    else:
-        is_consolidating = False
-
-    # 突破近 20 日高点
-    high_20 = np.max(highs[-21:-1]) if len(highs) >= 21 else np.max(highs[:-1])
-    is_breakout = closes[today] > high_20
-    bp1_details["high_20"] = float(high_20)
-    bp1_details["breakout"] = is_breakout
-
-    # 放量 ≥ 5日均量 1.5 倍
-    vol_ok = (vols[today] >= vol_ma5[today] * 1.5) if not np.isnan(vol_ma5[today]) else False
-    bp1_details["vol_ok"] = vol_ok
-
-    # 收盘 ≥ 突破位 × 1.005
-    confirm_close = closes[today] >= high_20 * 1.005
-    bp1_details["close_confirm"] = confirm_close
-
-    bp1_ok = is_consolidating and is_breakout and vol_ok and confirm_close
-
-    result["buy_points"]["买点一_放量突破"] = {
-        "triggered": bp1_ok,
-        "details": bp1_details,
-        "stop_loss": round(float(high_20 * 0.99), 2) if is_breakout else None,
-    }
+    bp1_setup = is_consolidating and is_breakout and amount_ok and close_confirm and sector_follow
+    stop_loss = recent_5_low * STOP_LOSS_RATIO if recent_5_low < high_20 else high_20 * STOP_LOSS_RATIO
+    bp1_triggered, bp1_status, bp1_execution = _status_for_setup(
+        bp1_setup,
+        next_row,
+        closes[idx],
+        needs_strength=False,
+        strength_ok=None,
+        blocked=emotion_extreme,
+    )
+    if emotion_extreme and bp1_setup:
+        bp1["manual_checks"].append("情绪极端日不追涨，买点一仅列观察")
+    bp1.update({
+        "triggered": bp1_triggered,
+        "setup_triggered": bp1_setup,
+        "status": bp1_status,
+        "details": {
+            "consolidation_5d_range": round(float(range_pct), 3),
+            "is_consolidating": is_consolidating,
+            "high_20": high_20,
+            "breakout": is_breakout,
+            "amount_ok": amount_ok,
+            "close_confirm": close_confirm,
+            "sector_follow": sector_follow,
+        },
+        "stop_loss": round(float(stop_loss), 2) if is_breakout else None,
+        "execution_check": bp1_execution,
+        "failure_signals": [
+            f"收盘价 < 突破位 × {STOP_LOSS_RATIO}",
+            "放量长上影或放量收阴",
+            "板块没有跟随",
+            "次日低开低走",
+        ],
+    })
+    result["buy_points"]["买点一_放量突破"] = bp1
 
     # ── 买点二：主升第一次缩量回踩 ──
-    bp2_ok = False
-    bp2_details = {}
+    bp2 = _empty_point(BUY_POINT_PRIORITY["买点二_主升回踩"], common_manual.copy())
+    above_ma5_3d = all(closes[i] > ma5[i] for i in range(max(idx - 2, 0), idx + 1) if not np.isnan(ma5[i]))
+    ma5_up = ma5[idx] > ma5[idx - 1] if not np.isnan(ma5[idx]) and not np.isnan(ma5[idx - 1]) else False
+    drops = _consecutive_drops(closes, idx)
+    near_ma5 = _near_ma_in_pullback(closes, ma5, idx, drops)
+    volume_down_invalid = _pullback_has_volume_down(closes, amounts, amount_ma5, idx, drops)
+    amount_shrink = amounts[idx] <= amounts[idx - 1] * PULLBACK_AMOUNT_PREV_RATIO and amounts[idx] <= amount_ma5[idx] * PULLBACK_AMOUNT_MA5_RATIO
+    above_ma5 = closes[idx] > ma5[idx] if not np.isnan(ma5[idx]) else False
+    sector_amount_ok = sector_amount_ratio is None or sector_amount_ratio >= 1.0
+    if sector_amount_ratio is None:
+        bp2["manual_checks"].append("买点二板块成交额未跌破 5 日均值需人工确认")
 
-    # 连续 3 日站上 5 日线
-    above_ma5_3d = all(
-        closes[i] > ma5[i] for i in range(today - 3, today)
-        if i >= 0 and not np.isnan(ma5[i])
-    ) if len(closes) >= 4 else False
-    bp2_details["above_ma5_3d"] = above_ma5_3d
-
-    # 5 日线向上
-    ma5_up = ma5[today] > ma5[today - 1] if (not np.isnan(ma5[today]) and
-                                                not np.isnan(ma5[today - 1])) else False
-    bp2_details["ma5_up"] = ma5_up
-
-    # 第一次回踩: 收盘价连续 ≥ 2 日下降 + 距 5 日线 ≤ 1%
-    consecutive_drop = 0
-    for i in range(today, max(today - 5, -len(closes)), -1):
-        if closes[i] < closes[i - 1]:
-            consecutive_drop += 1
-        else:
-            break
-    is_pullback_seq = consecutive_drop >= 2
-
-    near_ma5 = abs(closes[today] - ma5[today]) / ma5[today] <= 0.01 if (
-        not np.isnan(ma5[today]) and ma5[today] > 0) else False
-    bp2_details["consecutive_drops"] = consecutive_drop
-    bp2_details["near_ma5"] = near_ma5
-    bp2_details["is_first_pullback"] = is_pullback_seq and near_ma5
-
-    # 缩量: ≤ 前一日 70% 且 ≤ 5 日均量 80%
-    vol_shrink = (vols[today] <= vols[prev] * 0.7 and
-                  vols[today] <= vol_ma5[today] * 0.8) if not np.isnan(vol_ma5[today]) else False
-    bp2_details["vol_shrink"] = vol_shrink
-
-    # 不破 5 日线
-    above_ma5 = closes[today] > ma5[today] if not np.isnan(ma5[today]) else False
-    bp2_details["above_ma5"] = above_ma5
-
-    bp2_needs = [above_ma5_3d, ma5_up, is_pullback_seq, near_ma5, vol_shrink, above_ma5]
-    bp2_ok = all(bp2_needs)
-
-    pullback_low = float(lows[today])
-    result["buy_points"]["买点二_主升回踩"] = {
-        "triggered": bp2_ok,
-        "details": bp2_details,
-        "stop_loss": round(float(pullback_low * 0.99), 2),
-        "note": "需次日收阳且成交额 ≥ 回调日 1.2 倍才能确认执行",
-    }
+    bp2_setup = above_ma5_3d and ma5_up and drops >= 2 and near_ma5 and amount_shrink and above_ma5 and sector_amount_ok and not volume_down_invalid
+    strength_ok = _next_strength_ok(next_row, amounts[idx])
+    bp2_triggered, bp2_status, bp2_execution = _status_for_setup(bp2_setup, next_row, closes[idx], True, strength_ok)
+    ma5_stop = ma5[idx] * STOP_LOSS_RATIO if not np.isnan(ma5[idx]) else None
+    low_stop = lows[idx] * STOP_LOSS_RATIO
+    bp2_stop = ma5_stop if ma5_stop is not None and ma5[idx] >= lows[idx] and (ma5[idx] - lows[idx]) / lows[idx] <= 0.02 else low_stop
+    bp2.update({
+        "triggered": bp2_triggered,
+        "setup_triggered": bp2_setup,
+        "status": bp2_status,
+        "details": {
+            "above_ma5_3d": above_ma5_3d,
+            "ma5_up": ma5_up,
+            "consecutive_drops": drops,
+            "near_ma5": near_ma5,
+            "amount_shrink": amount_shrink,
+            "above_ma5": above_ma5,
+            "sector_amount_ok": sector_amount_ok,
+            "volume_down_invalid": volume_down_invalid,
+            "next_strength_ok": strength_ok,
+        },
+        "stop_loss": round(float(bp2_stop), 2),
+        "execution_check": bp2_execution,
+        "failure_signals": [
+            "回调变成放量下跌",
+            "收盘跌破止损位",
+            "反弹日成交额 < 5 日均额 90%",
+            "板块核心股集体走弱",
+        ],
+    })
+    result["buy_points"]["买点二_主升回踩"] = bp2
 
     # ── 买点三：突破回踩确认 ──
-    bp3_ok = False
-    bp3_details = {}
-
-    # 近 10 日内有过 60 日新高
-    high_60 = np.max(highs[-61:-1]) if len(highs) >= 61 else np.max(highs[:-1])
-    recent_high_60 = any(h >= high_60 for h in highs[-11:-1])  # 前 1-10 天
-    bp3_details["high_60"] = float(high_60)
-    bp3_details["recent_60d_high"] = recent_high_60
-
-    # 回踩缩量 ≤ 突破日 60%
-    breakout_day_vol = vols[-11:-1][np.argmax(highs[-11:-1])] if len(vols) >= 11 else vols[-1]
-    bp3_vol_shrink = vols[today] <= breakout_day_vol * 0.6
-    bp3_details["vol_shrink_vs_breakout"] = bp3_vol_shrink
-
-    # 不破突破位
-    bp3_above_breakout = closes[today] > high_60 * 0.99
-    bp3_details["above_breakout"] = bp3_above_breakout
-
-    bp3_ok = recent_high_60 and bp3_vol_shrink and bp3_above_breakout
-
-    result["buy_points"]["买点三_突破确认"] = {
-        "triggered": bp3_ok,
-        "details": bp3_details,
-        "stop_loss": round(float(high_60 * 0.99), 2),
-        "note": "需次日收阳且成交额 ≥ 回踩日 1.2 倍才能确认执行",
-    }
+    bp3 = _empty_point(BUY_POINT_PRIORITY["买点三_突破确认"], common_manual.copy())
+    high_60 = float(np.max(highs[-61:-1])) if len(highs) >= 61 else float(np.max(highs[:-1]))
+    breakout_candidates = [i for i in range(max(idx - 10, 0), idx) if highs[i] >= high_60]
+    breakout_idx = breakout_candidates[-1] if breakout_candidates else None
+    recent_high_60 = breakout_idx is not None
+    breakout_amount = amounts[breakout_idx] if breakout_idx is not None else amounts[idx]
+    bp3_amount_shrink = amounts[idx] <= breakout_amount * 0.6
+    bp3_above_breakout = closes[idx] >= high_60
+    sector_not_weak = sector_pct is None or sector_pct >= 0
+    if sector_pct is None:
+        bp3["manual_checks"].append("买点三板块同期没有走弱需人工确认")
+    bp3_setup = recent_high_60 and bp3_amount_shrink and bp3_above_breakout and sector_not_weak
+    bp3_strength_ok = _next_strength_ok(next_row, amounts[idx])
+    bp3_triggered, bp3_status, bp3_execution = _status_for_setup(bp3_setup, next_row, closes[idx], True, bp3_strength_ok)
+    pullback_low = float(lows[idx])
+    bp3_stop = pullback_low * STOP_LOSS_RATIO if pullback_low > high_60 * 1.03 else high_60 * STOP_LOSS_RATIO
+    bp3.update({
+        "triggered": bp3_triggered,
+        "setup_triggered": bp3_setup,
+        "status": bp3_status,
+        "details": {
+            "high_60": high_60,
+            "recent_60d_high": recent_high_60,
+            "breakout_date": hist.iloc[breakout_idx]["trade_date"] if breakout_idx is not None else None,
+            "breakout_amount": float(breakout_amount),
+            "amount_shrink_vs_breakout": bp3_amount_shrink,
+            "above_breakout": bp3_above_breakout,
+            "sector_not_weak": sector_not_weak,
+            "next_strength_ok": bp3_strength_ok,
+        },
+        "stop_loss": round(float(bp3_stop), 2),
+        "execution_check": bp3_execution,
+        "failure_signals": [
+            f"收盘跌破突破位 × {STOP_LOSS_RATIO}",
+            "回踩变成放量下跌",
+            "反弹日成交额 < 5 日均额 90%",
+            "板块走弱",
+        ],
+    })
+    result["buy_points"]["买点三_突破确认"] = bp3
 
     # ── 买点四：趋势均线支撑 ──
-    bp4_ok = False
-    bp4_details = {}
-
-    # 选择均线: 10 日或 20 日
-    if not np.isnan(ma10[today]) and ma10[today] < ma20[today]:
-        trend_ma = ma10
-        trend_ma_name = "MA10"
+    bp4 = _empty_point(BUY_POINT_PRIORITY["买点四_趋势均线"], common_manual.copy())
+    gain_20d = (closes[idx] - closes[-20]) / closes[-20] if len(closes) >= 20 else 0
+    bp4_candidates = []
+    for ma_name, trend_ma in (("MA10", ma10), ("MA20", ma20)):
+        if np.isnan(trend_ma[idx]) or np.isnan(trend_ma[idx - 1]):
+            continue
+        trend_ma_up = trend_ma[idx] > trend_ma[idx - 1]
+        along_ma_10d = all(closes[i] > trend_ma[i] for i in range(max(idx - 9, 0), idx + 1) if not np.isnan(trend_ma[i]))
+        near_trend_ma = _near_ma_in_pullback(closes, trend_ma, idx, drops)
+        amount_shrink4 = amounts[idx] <= amount_ma5[idx] * PULLBACK_AMOUNT_MA5_RATIO if not np.isnan(amount_ma5[idx]) else False
+        above_trend_ma = closes[idx] > trend_ma[idx]
+        gain_ok = gain_20d <= BUY_POINT_4_MAX_GAIN_20D
+        setup = trend_ma_up and along_ma_10d and near_trend_ma and drops >= 2 and gain_ok and amount_shrink4 and above_trend_ma
+        bp4_candidates.append({
+            "ma_name": ma_name,
+            "trend_ma_val": float(trend_ma[idx]),
+            "trend_ma_up": trend_ma_up,
+            "along_ma_10d": along_ma_10d,
+            "near_trend_ma": near_trend_ma,
+            "amount_shrink": amount_shrink4,
+            "above_ma": above_trend_ma,
+            "gain_ok": gain_ok,
+            "setup": setup,
+        })
+    selected_bp4 = next((item for item in bp4_candidates if item["setup"]), bp4_candidates[0] if bp4_candidates else None)
+    bp4_setup = bool(selected_bp4 and selected_bp4["setup"])
+    bp4_strength_ok = _next_strength_ok(next_row, amounts[idx])
+    bp4_triggered, bp4_status, bp4_execution = _status_for_setup(bp4_setup, next_row, closes[idx], True, bp4_strength_ok)
+    if selected_bp4:
+        ma_stop = selected_bp4["trend_ma_val"] * STOP_LOSS_RATIO
+        low_stop = lows[idx] * STOP_LOSS_RATIO
+        bp4_stop = max(ma_stop, low_stop)
     else:
-        trend_ma = ma20
-        trend_ma_name = "MA20"
+        bp4_stop = None
+    bp4.update({
+        "triggered": bp4_triggered,
+        "setup_triggered": bp4_setup,
+        "status": bp4_status,
+        "details": {
+            "selected_ma": selected_bp4["ma_name"] if selected_bp4 else None,
+            "candidates": bp4_candidates,
+            "consecutive_drops": drops,
+            "gain_20d": round(float(gain_20d), 3),
+            "next_strength_ok": bp4_strength_ok,
+            "note": "趋势成熟阶段，买点优先级最低",
+        },
+        "stop_loss": round(float(bp4_stop), 2) if bp4_stop is not None else None,
+        "execution_check": bp4_execution,
+        "failure_signals": [
+            f"收盘跌破均线 × {STOP_LOSS_RATIO}",
+            "放量跌破均线",
+            "反弹无力，次日继续下跌",
+            "板块核心股集体走弱",
+        ],
+    })
+    result["buy_points"]["买点四_趋势均线"] = bp4
 
-    trend_ma_val = trend_ma[today]
-    trend_ma_up = trend_ma[today] > trend_ma[today - 1] if (
-        not np.isnan(trend_ma[today]) and not np.isnan(trend_ma[today - 1])) else False
-
-    # 连续 10 日沿均线上行
-    along_ma_10d = all(closes[i] > trend_ma[i] for i in range(today - 10, today)
-                       if i >= 0 and not np.isnan(trend_ma[i]))
-    bp4_details["along_ma_10d"] = along_ma_10d
-    bp4_details["trend_ma"] = trend_ma_name
-    bp4_details["trend_ma_val"] = float(trend_ma_val) if not np.isnan(trend_ma_val) else None
-    bp4_details["trend_ma_up"] = trend_ma_up
-
-    # 首次回踩: 距均线 ≤ 1% + 连续 ≥ 2 日下降
-    near_trend_ma = abs(closes[today] - trend_ma_val) / trend_ma_val <= 0.01 if (
-        not np.isnan(trend_ma_val) and trend_ma_val > 0) else False
-    bp4_details["near_trend_ma"] = near_trend_ma
-
-    # 近 20 日涨幅 ≤ 50%
-    if len(closes) >= 20:
-        gain_20d = (closes[today] - closes[-20]) / closes[-20]
-        bp4_details["gain_20d"] = round(float(gain_20d), 3)
-        gain_ok = gain_20d <= 0.50
-    else:
-        gain_ok = True
-    bp4_details["gain_ok"] = gain_ok
-
-    # 缩量
-    bp4_vol_shrink = vols[today] <= vol_ma5[today] * 0.8 if not np.isnan(vol_ma5[today]) else False
-    bp4_details["vol_shrink"] = bp4_vol_shrink
-
-    # 不破均线
-    bp4_above_ma = closes[today] > trend_ma_val if not np.isnan(trend_ma_val) else False
-    bp4_details["above_ma"] = bp4_above_ma
-
-    bp4_ok = (trend_ma_up and along_ma_10d and near_trend_ma and
-              is_pullback_seq and gain_ok and bp4_vol_shrink and bp4_above_ma)
-
-    result["buy_points"]["买点四_趋势均线"] = {
-        "triggered": bp4_ok,
-        "details": bp4_details,
-        "stop_loss": round(float(trend_ma_val * 0.99), 2) if not np.isnan(trend_ma_val) else None,
-        "note": "风险预算减半。需次日收阳且成交额 ≥ 回踩日 1.2 倍确认",
-    }
-
-    # 汇总
-    triggered = [k for k, v in result["buy_points"].items() if v["triggered"]]
-    result["any_triggered"] = len(triggered) > 0
-    result["triggered_list"] = triggered
-
+    selected, suppressed = _select_highest_priority_buy_point(result["buy_points"])
+    result["selected_buy_point"] = selected
+    result["suppressed_by_priority"] = suppressed
+    result["any_triggered"] = selected is not None
+    result["triggered_list"] = [name for name, info in result["buy_points"].items() if info.get("triggered")]
+    result["setup_list"] = [name for name, info in result["buy_points"].items() if info.get("setup_triggered")]
     return result
