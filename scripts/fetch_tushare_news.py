@@ -283,7 +283,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="抓取 Tushare 资讯数据页面并生成清洗后的 Markdown")
     parser.add_argument("--all", action="store_true", help="抓取全部已知来源")
     parser.add_argument("--source", action="append", choices=DEFAULT_SOURCES, help="指定来源 slug，可重复传入")
-    parser.add_argument("--docs-dir", default="docs/tushare_news", help="Markdown 归档根目录")
+    parser.add_argument("--docs-dir", default="docs/tushare-news", help="Markdown 归档根目录")
     parser.add_argument("--run-id", default=datetime.now().strftime("%Y-%m-%d-%H%M"), help="归档目录名，格式 YYYY-MM-DD-HHMM，默认当前分钟")
     parser.add_argument("--env-file", default=".env", help="读取环境变量的 .env 文件")
     parser.add_argument("--cookie-env", default="TUSHARE_COOKIE", help="读取 Cookie 的环境变量名")

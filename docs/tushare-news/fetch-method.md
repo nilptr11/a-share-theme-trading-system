@@ -25,7 +25,7 @@ uv run scripts/fetch_tushare_news.py --all
 默认输出到当前分钟的批次目录，例如：
 
 ```text
-docs/tushare_news/YYYY-MM-DD-HHMM/
+docs/tushare-news/YYYY-MM-DD-HHMM/
 ```
 
 补抓或重跑指定批次：
@@ -42,11 +42,11 @@ uv run scripts/fetch_tushare_news.py --source eastmoney --source sina
 
 ## 输出
 
-- `docs/tushare_news/YYYY-MM-DD-HHMM/sources.md`：该批次来源与频道统计。
-- `docs/tushare_news/YYYY-MM-DD-HHMM/source-*.md`：该批次各来源完整快照。
-- `docs/tushare_news/README.md`：批次归档索引。
-- `docs/tushare_news/page-structure.md`：页面结构说明。
-- `docs/tushare_news/fetch-method.md`：稳定抓取方式说明。
+- `docs/tushare-news/YYYY-MM-DD-HHMM/sources.md`：该批次来源与频道统计。
+- `docs/tushare-news/YYYY-MM-DD-HHMM/source-*.md`：该批次各来源完整快照。
+- `docs/tushare-news/README.md`：批次归档索引。
+- `docs/tushare-news/page-structure.md`：页面结构说明。
+- `docs/tushare-news/fetch-method.md`：稳定抓取方式说明。
 
 ## 稳定性检查
 
