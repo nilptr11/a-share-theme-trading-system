@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 |------|------|
-| [trading-system/trading-reference.md](trading-system/trading-reference.md) | 核心执行版，定义交易准入、主线判断、买点、仓位、卖出、暂停、成本和复盘边界 |
+| [docs/trading-system/trading-reference.md](docs/trading-system/trading-reference.md) | 核心执行版，定义交易准入、主线判断、买点、仓位、卖出、暂停、成本和复盘边界 |
 
 ## 使用顺序
 
