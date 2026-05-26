@@ -16,7 +16,7 @@ from .constants import (
     REBOUND_AMOUNT_RATIO,
     STOP_LOSS_RATIO,
 )
-from .utils import BUY_POINT_PRIORITY, _check_open_gap, _ma, _n_days_ago, _select_highest_priority_buy_point
+from .utils import BUY_POINT_PRIORITY, _check_open_gap, _has_prior_pullback, _ma, _n_days_ago, _select_highest_priority_buy_point
 
 
 def _n_days_after(date_str: str, n: int) -> str:
@@ -128,6 +128,7 @@ def scan_buy_points(
         return {"ok": False, "error": "确认日前历史数据不足"}
 
     next_row = df.iloc[today + 1] if today + 1 < len(df) else None
+    next_next_row = df.iloc[today + 2] if today + 2 < len(df) else None
     hist = df.iloc[:today + 1].copy()
     closes = hist["close"].astype(float).values
     highs = hist["high"].astype(float).values
@@ -232,8 +233,13 @@ def scan_buy_points(
         bp2["manual_checks"].append("买点二板块成交额未跌破 5 日均值需人工确认")
 
     bp2_setup = above_ma5_3d and ma5_up and drops >= 2 and near_ma5 and amount_shrink and above_ma5 and sector_amount_ok and not volume_down_invalid
+    is_second_pullback_bp2 = _has_prior_pullback(closes, ma5, idx, current_drops=drops)
+    if is_second_pullback_bp2:
+        bp2["manual_checks"].append("检测到此前已出现过回踩 5 日线，当前可能不是第一次回踩 → 禁止清单：不做第二次回踩")
+        bp2_setup = False
     strength_ok = _next_strength_ok(next_row, amounts[idx])
-    bp2_triggered, bp2_status, bp2_execution = _status_for_setup(bp2_setup, next_row, closes[idx], True, strength_ok)
+    bp2_confirm_close = float(next_row["close"]) if next_row is not None else closes[idx]
+    bp2_triggered, bp2_status, bp2_execution = _status_for_setup(bp2_setup, next_next_row, bp2_confirm_close, True, strength_ok)
     ma5_stop = ma5[idx] * STOP_LOSS_RATIO if not np.isnan(ma5[idx]) else None
     low_stop = lows[idx] * STOP_LOSS_RATIO
     bp2_stop = ma5_stop if ma5_stop is not None and ma5[idx] >= lows[idx] and (ma5[idx] - lows[idx]) / lows[idx] <= 0.02 else low_stop
@@ -277,7 +283,8 @@ def scan_buy_points(
         bp3["manual_checks"].append("买点三板块同期没有走弱需人工确认")
     bp3_setup = recent_high_60 and bp3_amount_shrink and bp3_above_breakout and sector_not_weak
     bp3_strength_ok = _next_strength_ok(next_row, amounts[idx])
-    bp3_triggered, bp3_status, bp3_execution = _status_for_setup(bp3_setup, next_row, closes[idx], True, bp3_strength_ok)
+    bp3_confirm_close = float(next_row["close"]) if next_row is not None else closes[idx]
+    bp3_triggered, bp3_status, bp3_execution = _status_for_setup(bp3_setup, next_next_row, bp3_confirm_close, True, bp3_strength_ok)
     pullback_low = float(lows[idx])
     bp3_stop = pullback_low * STOP_LOSS_RATIO if pullback_low > high_60 * 1.03 else high_60 * STOP_LOSS_RATIO
     bp3.update({
@@ -332,8 +339,14 @@ def scan_buy_points(
         })
     selected_bp4 = next((item for item in bp4_candidates if item["setup"]), bp4_candidates[0] if bp4_candidates else None)
     bp4_setup = bool(selected_bp4 and selected_bp4["setup"])
+    if bp4_setup and selected_bp4:
+        trend_ma_arr = ma10 if selected_bp4["ma_name"] == "MA10" else ma20
+        if _has_prior_pullback(closes, trend_ma_arr, idx, current_drops=drops):
+            bp4["manual_checks"].append("检测到此前已出现过回踩该均线，当前可能不是第一次回踩 → 禁止清单：不做第二次回踩")
+            bp4_setup = False
     bp4_strength_ok = _next_strength_ok(next_row, amounts[idx])
-    bp4_triggered, bp4_status, bp4_execution = _status_for_setup(bp4_setup, next_row, closes[idx], True, bp4_strength_ok)
+    bp4_confirm_close = float(next_row["close"]) if next_row is not None else closes[idx]
+    bp4_triggered, bp4_status, bp4_execution = _status_for_setup(bp4_setup, next_next_row, bp4_confirm_close, True, bp4_strength_ok)
     if selected_bp4:
         ma_stop = selected_bp4["trend_ma_val"] * STOP_LOSS_RATIO
         low_stop = lows[idx] * STOP_LOSS_RATIO

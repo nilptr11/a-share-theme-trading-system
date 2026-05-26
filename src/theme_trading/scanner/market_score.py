@@ -6,7 +6,6 @@ from theme_trading.data.market_data import fetch_daily, fetch_index_daily, fetch
 
 from .constants import (
     BREADTH_ICE,
-    BREADTH_NORMAL_UPPER,
     BREADTH_OVERHEAT,
     BREADTH_WEAK_UPPER,
     INDEX_DAILY_DROP_STOP,
@@ -61,7 +60,7 @@ def _breadth_state(up_count: int) -> str:
         return "ice"
     if up_count < BREADTH_WEAK_UPPER:
         return "weak"
-    if up_count <= BREADTH_NORMAL_UPPER:
+    if up_count <= BREADTH_OVERHEAT:
         return "normal"
     return "overheat"
 

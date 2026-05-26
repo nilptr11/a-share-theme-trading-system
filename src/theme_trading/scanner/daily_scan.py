@@ -5,6 +5,7 @@ from theme_trading.data.tushare_client import clear_cache
 from .buy_points import scan_buy_points
 from .core_stocks import filter_core_stocks
 from .market_score import compute_market_score
+from .pre_trade import pre_trade_checklist
 from .themes import find_main_themes
 
 
@@ -47,6 +48,12 @@ def daily_scan(
     market_closed = score.get("trade_permission") == "closed"
     if market_closed:
         report["human_judgment"].append("市场开关关闭，后续只生成观察池，不生成可执行预案")
+
+    if score.get("emotion_extreme"):
+        report["risk_notes"] = report.get("risk_notes", [])
+        report["risk_notes"].append(
+            "情绪极端（上涨家数 > 3500 或板块高潮）：新开仓风险预算降至 0.5%，不追涨，只等分歧后的回踩确认"
+        )
 
     themes = find_main_themes(trade_date, top_n=theme_top_n)
     report["themes"] = themes
@@ -109,6 +116,11 @@ def daily_scan(
                 "manual_checks": info.get("manual_checks", []),
                 "suppressed_by_priority": bp.get("suppressed_by_priority", []),
             }
+            if selected == "买点四_趋势均线":
+                signal["risk_budget_note"] = "买点四趋势成熟阶段，风险预算减半（强市 0.5%，中市 0.25%）"
+            if score.get("emotion_extreme"):
+                signal["risk_budget_note"] = signal.get("risk_budget_note", "情绪极端，风险预算降至 0.5%")
+
             report["buy_scans"].append(bp)
             if market_closed:
                 signal["reason"] = "市场开关关闭，仅观察"
@@ -125,5 +137,25 @@ def daily_scan(
 
     if not report["buy_scans"]:
         report["human_judgment"].append("确认核心股中无买点 setup 触发")
+
+    theme_by_name = {theme["ts_code"]: theme for theme in confirmed_themes}
+    report["pre_trade_checks"] = []
+    for plan in report.get("executable_plans", []):
+        ts_code = plan["ts_code"]
+        stock = next((s for s in confirmed_core_stocks[:10] if s["ts_code"] == ts_code), None)
+        sector_ctx = theme_by_name.get(stock.get("sector_code")) if stock else None
+        checklist = pre_trade_checklist(
+            market_context=score,
+            theme_context=sector_ctx,
+            core_stock=stock,
+            buy_point_info=plan,
+        )
+        report["pre_trade_checks"].append({
+            "ts_code": ts_code,
+            "all_passed": checklist["all_passed"],
+            "checks": checklist["checks"],
+            "three_questions": checklist["three_questions"],
+            "block_reasons": checklist["block_reasons"],
+        })
 
     return report

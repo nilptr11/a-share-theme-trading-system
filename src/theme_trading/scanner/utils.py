@@ -106,3 +106,34 @@ def _select_highest_priority_buy_point(buy_points: dict) -> tuple[str | None, li
 
 def _amount_col(df: pd.DataFrame) -> str:
     return "amount" if df is not None and "amount" in df.columns else "vol"
+
+
+def _has_prior_pullback(closes: np.ndarray, ma_values: np.ndarray, today: int, current_drops: int = 0, lookback: int = 20, tolerance: float = 0.01) -> bool:
+    """检查在当前回踩序列之前是否已有过满足"第一次回踩"定义的 pullback。
+
+    current_drops: 当前已检测到的连续下跌天数，用于确定当前回踩的起点。
+    只扫描当前回踩起点之前的区间，避免把当前回踩自身误判为"历史回踩"。
+    """
+    if today < 3:
+        return False
+
+    current_pullback_start = today - current_drops + 1 if current_drops > 0 else today
+    prior_end = current_pullback_start - 2
+    prior_start = max(today - lookback, 0)
+    if prior_end <= prior_start:
+        return False
+
+    for i in range(prior_start + 2, prior_end + 1):
+        if np.isnan(ma_values[i]):
+            continue
+        drops = 0
+        for j in range(i, max(i - 5, prior_start), -1):
+            if closes[j] < closes[j - 1]:
+                drops += 1
+            else:
+                break
+        if drops >= 2:
+            for d in range(max(i - drops + 1, 0), i + 1):
+                if not np.isnan(ma_values[d]) and ma_values[d] > 0 and abs(closes[d] - ma_values[d]) / ma_values[d] <= tolerance:
+                    return True
+    return False

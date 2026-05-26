@@ -113,12 +113,26 @@ def main():
             print(f"  {item['ts_code']}  {item['buy_point']}  状态 {item['status']}  "
                   f"确认收盘 {item.get('close')}  止损参考 {item.get('stop_loss')}")
             print(f"    执行条件: {execution.get('rule', '次日开盘 ±3% 内')}")
+            if item.get("risk_budget_note"):
+                print(f"    ⚠ 风险提示: {item['risk_budget_note']}")
             failures = item.get("failure_signals", [])
             if failures:
                 print(f"    失败信号: {' / '.join(failures[:3])}")
         print()
-    elif not args.no_buy_points:
-        print("无次日可执行预案")
+
+    pre_trade = report.get("pre_trade_checks", [])
+    if pre_trade:
+        print(f"买入前检查清单 ({len(pre_trade)} 项):")
+        for check in pre_trade:
+            passed_str = "通过" if check["all_passed"] else "未通过"
+            questions = check.get("three_questions", {})
+            print(f"  {check['ts_code']}: {passed_str}")
+            if questions.get("answered"):
+                print(f"    为什么是它: {questions['why_this']}")
+                print(f"    为什么是现在: {questions['why_now']}")
+                print(f"    错了在哪里走: {questions['where_exit']}")
+            for reason in check.get("block_reasons", []):
+                print(f"    ✗ {reason}")
         print()
 
     blocked = report.get("blocked_reasons", [])
@@ -141,6 +155,13 @@ def main():
         print("需人工确认:")
         for h in human:
             print(f"  ? {h}")
+
+    risk_notes = report.get("risk_notes", [])
+    if risk_notes:
+        print()
+        print("风险提示:")
+        for note in risk_notes:
+            print(f"  ⚠ {note}")
 
     print()
     print(f"总耗时: {_time.time() - t0:.0f}s")
