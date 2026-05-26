@@ -5,7 +5,8 @@
 """
 
 import pandas as pd
-from tushare_proxy import get_pro, safe_query, cached_query
+
+from .tushare_client import cached_query, get_pro, safe_query
 
 # ── 市场级接口 ─────────────────────────────────────────────────────
 

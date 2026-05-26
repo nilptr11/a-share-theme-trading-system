@@ -10,7 +10,7 @@ import tushare as ts
 from dotenv import load_dotenv
 from tushare.pro import client as _ts_client
 
-_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 load_dotenv(_ENV_FILE)
 
 MIN_INTERVAL = 0.6

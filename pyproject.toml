@@ -13,5 +13,16 @@ dependencies = [
     "tushare>=1.4.0",
 ]
 
+[project.scripts]
+daily-scan = "theme_trading.cli.daily_scan:main"
+fetch-tushare-news = "theme_trading.cli.fetch_news:main"
+
 [tool.uv]
-package = false
+package = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
