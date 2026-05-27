@@ -17,10 +17,30 @@ MIN_INTERVAL = 0.6
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 1.0
 _last_call: float = 0.0
+_auth_failed_reason: str | None = None
+_auth_skip_reported = False
 
 
 class TushareConfigError(RuntimeError):
     pass
+
+
+class TushareAuthError(RuntimeError):
+    pass
+
+
+_AUTH_ERROR_HINTS = (
+    "tenant key expired",
+    "unauthorized",
+    "permission",
+    "没有访问该接口的权限",
+    "权限",
+)
+
+
+def is_tushare_auth_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(hint.lower() in message for hint in _AUTH_ERROR_HINTS)
 
 
 def _env(name: str) -> str:
@@ -62,6 +82,13 @@ def safe_query(fn):
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        global _auth_failed_reason, _auth_skip_reported
+        if _auth_failed_reason is not None:
+            if not _auth_skip_reported:
+                print(f"[tushare] 已检测到鉴权失败，跳过后续请求: {_auth_failed_reason}")
+                _auth_skip_reported = True
+            return None
+
         for attempt in range(1, MAX_RETRIES + 1):
             _rate_limit()
             try:
@@ -72,6 +99,11 @@ def safe_query(fn):
             except TushareConfigError:
                 raise
             except Exception as e:
+                if is_tushare_auth_error(e):
+                    _auth_failed_reason = str(e)
+                    _auth_skip_reported = False
+                    print(f"[tushare] {fn.__name__} 鉴权失败，不重试: {e}; args={args}, kwargs={kwargs}")
+                    return None
                 if attempt >= MAX_RETRIES:
                     print(f"[tushare] {fn.__name__} 查询失败: {e}; args={args}, kwargs={kwargs}")
                     return None
@@ -112,4 +144,7 @@ def cached_query(fn):
 
 def clear_cache():
     """清空请求缓存"""
+    global _auth_failed_reason, _auth_skip_reported
     _cache.clear()
+    _auth_failed_reason = None
+    _auth_skip_reported = False

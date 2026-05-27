@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 daily-scan = "theme_trading.cli.daily_scan:main"
 fetch-tushare-news = "theme_trading.cli.fetch_news:main"
+tushare-healthcheck = "theme_trading.cli.tushare_healthcheck:main"
 
 [tool.uv]
 package = true

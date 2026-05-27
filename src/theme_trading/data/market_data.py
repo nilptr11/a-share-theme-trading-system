@@ -45,9 +45,10 @@ def fetch_limit_list(trade_date: str, limit_type: str = None) -> pd.DataFrame | 
     """
     pro = get_pro()
     kwargs = {"trade_date": trade_date}
-    if limit_type:
-        kwargs["limit_type"] = limit_type
-    return pro.limit_list(**kwargs)
+    df = pro.limit_list_d(**kwargs)
+    if limit_type and df is not None and "limit" in df.columns:
+        df = df[df["limit"].astype(str) == limit_type]
+    return df
 
 
 @safe_query

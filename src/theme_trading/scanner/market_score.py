@@ -65,6 +65,16 @@ def _breadth_state(up_count: int) -> str:
     return "overheat"
 
 
+def _latest_trade_date(df) -> str | None:
+    if df is None or len(df) == 0 or "trade_date" not in df.columns:
+        return None
+    return str(df["trade_date"].astype(str).max())
+
+
+def _is_fresh_for_trade_date(df, trade_date: str) -> bool:
+    return _latest_trade_date(df) == trade_date
+
+
 def compute_market_score(trade_date: str) -> dict:
     """计算市场评分 (0-10) 并检查硬规则。
 
@@ -97,6 +107,13 @@ def compute_market_score(trade_date: str) -> dict:
     )
 
     # ── 1a. 指数维度 (0-2) ──
+    if sh_idx is not None and not _is_fresh_for_trade_date(sh_idx, trade_date):
+        latest_date = _latest_trade_date(sh_idx)
+        result["data_warnings"].append(
+            f"上证指数数据最新日期 {latest_date}，早于扫描日期 {trade_date}，指数评分跳过"
+        )
+        sh_idx = None
+
     if sh_idx is None or len(sh_idx) < 20:
         result["human_judgment"].append("指数数据不足，无法计算 MA20")
     else:
@@ -137,6 +154,12 @@ def compute_market_score(trade_date: str) -> dict:
 
     # ── 1b. 成交量维度 (0-2) ──
     sz_idx = fetch_index_daily("399001.SZ", start_date=_n_days_ago(trade_date, 20), end_date=trade_date)
+    if sz_idx is not None and not _is_fresh_for_trade_date(sz_idx, trade_date):
+        latest_date = _latest_trade_date(sz_idx)
+        result["data_warnings"].append(
+            f"深证成指数据最新日期 {latest_date}，早于扫描日期 {trade_date}，成交量评分跳过"
+        )
+        sz_idx = None
     if sh_idx is not None and sz_idx is not None:
         sh_amt = sh_idx.sort_values("trade_date")[["trade_date", "amount"]].copy()
         sz_amt = sz_idx.sort_values("trade_date")[["trade_date", "amount"]].copy()
@@ -258,12 +281,14 @@ def compute_market_score(trade_date: str) -> dict:
         result["data_warnings"].append("全市场日线数据缺失，无法统计上涨家数")
 
     # ── 1e. 主线维度 (0-3) ──
+    # 这里只用 limit_cpt_list 做市场评分中的题材热度代理。
+    # 正式主线确认以 themes.py 的五条件清单为准，不用该分数替代主线开关。
     if limit_cpt is not None and len(limit_cpt) > 0:
         top_sector = limit_cpt.iloc[0]
         days = int(top_sector.get("days", 0))
         result["details"]["top_sector"] = top_sector.get("name", "")
         result["details"]["top_sector_days"] = days
-        result["details"]["theme_score_basis"] = "limit_cpt_list preliminary"
+        result["details"]["theme_score_basis"] = "limit_cpt_list heat proxy; final theme confirmation uses themes.py conditions"
 
         if days >= 4:
             result["theme_score"] = 3
@@ -291,6 +316,41 @@ def compute_market_score(trade_date: str) -> dict:
     result["market_level"] = _market_level(result["score"])
     result["trade_permission"] = _trade_permission(result["market_level"], result["hard_rules"]["passed"])
     result["ok"] = result["trade_permission"] != "closed"
+    return result
+
+
+def check_sector_climax(sector_context: dict | None) -> dict:
+    """检测板块高潮信号。
+
+    判断标准（参考 6.4 主动止盈 + 9. 核心数值）：
+      - 板块涨停 ≥ 8 只
+      - 板块涨幅 ≥ 4%
+      - 板块涨幅 ≥ 3% 且成交额创近 5 日新高
+
+    返回: { climax, reasons, action_notes }
+    """
+    result = {"climax": False, "reasons": [], "action_notes": []}
+    if not sector_context:
+        return result
+
+    up_in_sector = sector_context.get("up_in_sector", 0)
+    if up_in_sector >= 8:
+        result["reasons"].append(f"板块涨停 {up_in_sector} 只 ≥ 8")
+        result["climax"] = True
+
+    pct = sector_context.get("pct_chg", 0)
+    if pct >= 4.0:
+        result["reasons"].append(f"板块涨幅 {pct:.1f}% ≥ 4%")
+        result["climax"] = True
+
+    amt_5d_high = sector_context.get("amount_5d_high", False)
+    if pct >= 3.0 and amt_5d_high:
+        result["reasons"].append(f"板块涨幅 {pct:.1f}% ≥ 3% 且成交额创近 5 日新高")
+        result["climax"] = True
+
+    if result["climax"]:
+        result["action_notes"].append("板块高潮：优先检查卖点/止盈预案，不追涨")
+
     return result
 
 
