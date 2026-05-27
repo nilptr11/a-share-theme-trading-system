@@ -1,7 +1,7 @@
 [project]
 name = "a-share-theme-trading-system"
 version = "0.1.0"
-description = "A-share theme trading system scripts"
+description = "A-share theme stock scanning scripts"
 requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4>=4.12.0",
