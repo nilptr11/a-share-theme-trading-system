@@ -112,14 +112,21 @@ def daily_scan(
 
 
 def _append_sector_climax_notes(report: dict, sectors: list[dict]) -> None:
+    climax_names = []
     for sector in sectors[:3]:
         sc = check_sector_climax(sector)
         if sc["climax"]:
+            name = sector.get("name", sector.get("ts_code", ""))
+            climax_names.append(name)
             add_risk_note(
                 report,
-                f"板块 {sector.get('name', sector.get('ts_code', ''))} 高潮信号: {'; '.join(sc['reasons'])}",
+                f"板块 {name} 高潮信号: {'; '.join(sc['reasons'])}",
             )
-            report["human_judgment"].extend(sc["action_notes"])
+
+    if climax_names:
+        report["human_judgment"].append(
+            f"板块高潮：{', '.join(climax_names)}；优先检查卖点/止盈预案，不追涨"
+        )
 
 
 def _score_for_stock(score: dict, sector_context: dict | None) -> dict:

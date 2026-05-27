@@ -17,6 +17,14 @@ from .constants import (
 from .utils import _amount_col, _n_days_ago, _rank_map, _recent_all_ratio
 
 
+EXCLUDED_THEME_NAME_KEYWORDS = ("昨日", "上市首五日", "近期异动")
+ABNORMAL_THEME_PCT_LIMIT = 100.0
+
+
+def _is_excluded_theme_name(name: str) -> bool:
+    return any(keyword in name for keyword in EXCLUDED_THEME_NAME_KEYWORDS)
+
+
 def _benchmark_map(trade_date: str, start_date: str) -> dict:
     sh_hist = fetch_index_daily("000001.SH", start_date=start_date, end_date=trade_date)
     if sh_hist is None:
@@ -112,13 +120,22 @@ def find_main_themes(trade_date: str, min_days: int = THEME_STRONG_DAYS, top_n: 
     if sh_idx is not None and len(sh_idx) > 0:
         benchmark_pct = float(sh_idx.iloc[0].get("pct_chg", 0))
 
-    sector_day = sector_day.copy()
-    sector_day["pct_change_f"] = sector_day["pct_change"].astype(float)
-    stronger_today = sector_day[sector_day["pct_change_f"] > benchmark_pct]
-    candidates_today = stronger_today.nlargest(top_n, "pct_change_f")
-
     ths_idx = fetch_ths_index()
     name_map = dict(zip(ths_idx["ts_code"], ths_idx["name"])) if ths_idx is not None and len(ths_idx) > 0 else {}
+
+    sector_day = sector_day.copy()
+    sector_day["pct_change_f"] = sector_day["pct_change"].astype(float)
+    sector_day["name"] = sector_day["ts_code"].map(name_map).fillna(sector_day["ts_code"])
+    excluded_name_mask = sector_day["name"].map(_is_excluded_theme_name)
+    abnormal_pct_mask = sector_day["pct_change_f"].abs() > ABNORMAL_THEME_PCT_LIMIT
+    excluded_count = int((excluded_name_mask | abnormal_pct_mask).sum())
+    if excluded_count:
+        result["data_warnings"].append(
+            f"已过滤 {excluded_count} 个行为标签或异常涨幅板块，避免污染主线候选"
+        )
+    sector_day = sector_day[~excluded_name_mask & ~abnormal_pct_mask]
+    stronger_today = sector_day[sector_day["pct_change_f"] > benchmark_pct]
+    candidates_today = stronger_today.nlargest(top_n, "pct_change_f")
 
     hist_start = _n_days_ago(trade_date, 15)
     sh_daily_map = _benchmark_map(trade_date, hist_start)

@@ -3,6 +3,19 @@
 from theme_trading.scanner import format_score_report
 
 
+THEME_CONDITION_LABELS = {
+    "stronger_than_market_2d": "连续2日强于上证",
+    "amount_expand_2d": "连续2日成交额≥5日均额1.3倍",
+    "limit_up_or_ladder": "涨停≥5只或高度≥3板",
+    "core_amount_rank": "板块内/全市场成交额核心",
+    "divergence_return": "分歧后资金回流",
+}
+
+
+def _format_theme_conditions(keys: list[str]) -> str:
+    return ", ".join(THEME_CONDITION_LABELS.get(key, key) for key in keys)
+
+
 def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None) -> str:
     lines: list[str] = []
     lines.append(format_score_report(report["market_score"]))
@@ -21,14 +34,14 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
             )
             missing = t.get("missing_conditions", [])
             if missing:
-                lines.append(f"    缺: {', '.join(missing)}")
+                lines.append(f"    缺: {_format_theme_conditions(missing)}")
         lines.append("")
     if watch_themes:
         lines.append(f"观察主线 ({len(watch_themes)} 个):")
         for t in watch_themes[:5]:
             lines.append(
                 f"  {t['name']:24s} {t['pct_chg']:+.2f}%  满足 {t['condition_count']}/5  "
-                f"缺: {', '.join(t.get('missing_conditions', []))}"
+                f"缺: {_format_theme_conditions(t.get('missing_conditions', []))}"
             )
         lines.append("")
 
