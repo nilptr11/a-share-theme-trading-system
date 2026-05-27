@@ -23,6 +23,21 @@ def _n_days_after(date_str: str, n: int) -> str:
     return (datetime.strptime(date_str, "%Y%m%d") + timedelta(days=n)).strftime("%Y%m%d")
 
 
+def _find_uptrend_start(closes: np.ndarray, ma20: np.ndarray, today: int) -> int:
+    """找到最近一次主升启动日索引。
+
+    从 today 向前扫描，找收盘价从 MA20 下方突破且 MA20 向上的日期。
+    若未找到明确突破点，退化为 today - 30。
+    """
+    search_start = max(today - 60, 0)
+    for i in range(today - 1, search_start, -1):
+        if np.isnan(ma20[i]) or np.isnan(ma20[i - 1]):
+            continue
+        if closes[i - 1] < ma20[i - 1] and closes[i] > ma20[i] and ma20[i] > ma20[i - 1]:
+            return i
+    return max(today - 30, 0)
+
+
 def _empty_point(priority: int, manual_checks: list[str] | None = None) -> dict:
     return {
         "triggered": False,
@@ -56,6 +71,56 @@ def _next_strength_ok(next_row, base_amount: float) -> bool | None:
     if "close" not in next_row or "open" not in next_row or "amount" not in next_row:
         return None
     return bool(float(next_row["close"]) > float(next_row["open"]) and float(next_row["amount"]) >= base_amount * REBOUND_AMOUNT_RATIO)
+
+
+def _is_platform_consolidation(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    today: int,
+    days: int = 5,
+    max_range_pct: float = 0.05,
+    max_close_drift_pct: float = 0.03,
+) -> tuple[bool, dict]:
+    """判断突破前是否为平台横盘，而不是缓慢单边推进。"""
+    if today < days:
+        return False, {
+            "range_pct": None,
+            "close_drift_pct": None,
+            "center_bias_max": None,
+            "close_band_ok": False,
+            "close_drift_ok": False,
+        }
+
+    start = today - days
+    recent_high = float(np.max(highs[start:today]))
+    recent_low = float(np.min(lows[start:today]))
+    recent_closes = closes[start:today].astype(float)
+    range_pct = (recent_high - recent_low) / recent_low if recent_low > 0 else 1.0
+
+    first_close = float(recent_closes[0])
+    last_close = float(recent_closes[-1])
+    close_drift_pct = abs(last_close / first_close - 1) if first_close > 0 else 1.0
+
+    center = (recent_high + recent_low) / 2
+    half_range = (recent_high - recent_low) / 2
+    if center <= 0 or half_range <= 0:
+        center_bias_max = 1.0
+        close_band_ok = False
+    else:
+        center_bias = np.abs(recent_closes - center) / half_range
+        center_bias_max = float(np.max(center_bias))
+        close_band_ok = bool(center_bias_max <= 0.9)
+
+    close_drift_ok = close_drift_pct <= max_close_drift_pct
+    is_consolidating = range_pct <= max_range_pct and close_drift_ok and close_band_ok
+    return is_consolidating, {
+        "range_pct": range_pct,
+        "close_drift_pct": close_drift_pct,
+        "center_bias_max": center_bias_max,
+        "close_band_ok": close_band_ok,
+        "close_drift_ok": close_drift_ok,
+    }
 
 
 def _consecutive_drops(closes: np.ndarray, today: int, max_days: int = 5) -> int:
@@ -98,7 +163,11 @@ def _status_for_setup(setup: bool, next_row, confirm_close: float, needs_strengt
     if needs_strength:
         if strength_ok is None:
             return False, "pending_next_day_strength", execution
-        return strength_ok, "executable_plan" if strength_ok else "invalid", execution
+        if not strength_ok:
+            return False, "invalid", execution
+        if not gap["checked"]:
+            return True, "pending_next_open", execution
+        return True, "executable_plan", execution
     if not gap["checked"]:
         return True, "pending_next_open", execution
     return True, "executable_plan", execution
@@ -153,7 +222,9 @@ def scan_buy_points(
         "ok": True,
         "ts_code": ts_code,
         "trade_date": trade_date,
-        "confirm_date": trade_date,
+        "setup_date": trade_date,
+        "confirm_date": None,
+        "execution_date": None,
         "close": float(closes[idx]),
         "ma5": float(ma5[idx]) if not np.isnan(ma5[idx]) else None,
         "ma10": float(ma10[idx]) if not np.isnan(ma10[idx]) else None,
@@ -165,6 +236,8 @@ def scan_buy_points(
         "manual_checks": common_manual,
     }
 
+    uptrend_start = _find_uptrend_start(closes, ma20, idx)
+
     sector_pct = sector_context.get("pct_chg") if sector_context else None
     sector_amount_ratio = sector_context.get("amount_ratio") or sector_context.get("vol_ratio") if sector_context else None
     emotion_extreme = bool(market_context.get("emotion_extreme")) if market_context else False
@@ -173,8 +246,8 @@ def scan_buy_points(
     bp1 = _empty_point(BUY_POINT_PRIORITY["买点一_放量突破"], common_manual.copy())
     recent_5_high = float(np.max(highs[-6:-1]))
     recent_5_low = float(np.min(lows[-6:-1]))
-    range_pct = (recent_5_high - recent_5_low) / recent_5_low if recent_5_low > 0 else 1.0
-    is_consolidating = range_pct <= 0.05
+    is_consolidating, consolidation = _is_platform_consolidation(highs, lows, closes, idx)
+    range_pct = consolidation["range_pct"] if consolidation["range_pct"] is not None else 1.0
     high_20 = float(np.max(highs[-21:-1]))
     is_breakout = closes[idx] > high_20
     amount_ok = amounts[idx] >= amount_ma5[idx] * BREAKOUT_AMOUNT_RATIO if not np.isnan(amount_ma5[idx]) else False
@@ -202,9 +275,14 @@ def scan_buy_points(
         "details": {
             "consolidation_5d_range": round(float(range_pct), 3),
             "is_consolidating": is_consolidating,
+            "consolidation_close_drift": round(float(consolidation["close_drift_pct"]), 3) if consolidation["close_drift_pct"] is not None else None,
+            "consolidation_center_bias": round(float(consolidation["center_bias_max"]), 3) if consolidation["center_bias_max"] is not None else None,
+            "consolidation_close_drift_ok": consolidation["close_drift_ok"],
+            "consolidation_close_band_ok": consolidation["close_band_ok"],
             "high_20": high_20,
             "breakout": is_breakout,
             "amount_ok": amount_ok,
+            "amount_ratio": round(float(amounts[idx] / amount_ma5[idx]), 2) if not np.isnan(amount_ma5[idx]) and amount_ma5[idx] > 0 else None,
             "close_confirm": close_confirm,
             "sector_follow": sector_follow,
         },
@@ -233,7 +311,7 @@ def scan_buy_points(
         bp2["manual_checks"].append("买点二板块成交额未跌破 5 日均值需人工确认")
 
     bp2_setup = above_ma5_3d and ma5_up and drops >= 2 and near_ma5 and amount_shrink and above_ma5 and sector_amount_ok and not volume_down_invalid
-    is_second_pullback_bp2 = _has_prior_pullback(closes, ma5, idx, current_drops=drops)
+    is_second_pullback_bp2 = _has_prior_pullback(closes, ma5, idx, current_drops=drops, lookback=idx - uptrend_start)
     if is_second_pullback_bp2:
         bp2["manual_checks"].append("检测到此前已出现过回踩 5 日线，当前可能不是第一次回踩 → 禁止清单：不做第二次回踩")
         bp2_setup = False
@@ -253,6 +331,8 @@ def scan_buy_points(
             "consecutive_drops": drops,
             "near_ma5": near_ma5,
             "amount_shrink": amount_shrink,
+            "amount_vs_prev_ratio": round(float(amounts[idx] / amounts[idx - 1]), 2) if idx > 0 and amounts[idx - 1] > 0 else None,
+            "amount_vs_ma5_ratio": round(float(amounts[idx] / amount_ma5[idx]), 2) if not np.isnan(amount_ma5[idx]) and amount_ma5[idx] > 0 else None,
             "above_ma5": above_ma5,
             "sector_amount_ok": sector_amount_ok,
             "volume_down_invalid": volume_down_invalid,
@@ -271,7 +351,8 @@ def scan_buy_points(
 
     # ── 买点三：突破回踩确认 ──
     bp3 = _empty_point(BUY_POINT_PRIORITY["买点三_突破确认"], common_manual.copy())
-    high_60 = float(np.max(highs[-61:-1])) if len(highs) >= 61 else float(np.max(highs[:-1]))
+    high_60_window = highs[-61:-1] if len(highs) >= 61 else highs[:-1]
+    high_60 = float(np.max(high_60_window))
     breakout_candidates = [i for i in range(max(idx - 10, 0), idx) if highs[i] >= high_60]
     breakout_idx = breakout_candidates[-1] if breakout_candidates else None
     recent_high_60 = breakout_idx is not None
@@ -293,10 +374,12 @@ def scan_buy_points(
         "status": bp3_status,
         "details": {
             "high_60": high_60,
+            "high_60_lookback_days": int(len(high_60_window)),
             "recent_60d_high": recent_high_60,
             "breakout_date": hist.iloc[breakout_idx]["trade_date"] if breakout_idx is not None else None,
             "breakout_amount": float(breakout_amount),
             "amount_shrink_vs_breakout": bp3_amount_shrink,
+            "amount_vs_breakout_ratio": round(float(amounts[idx] / breakout_amount), 2) if breakout_amount > 0 else None,
             "above_breakout": bp3_above_breakout,
             "sector_not_weak": sector_not_weak,
             "next_strength_ok": bp3_strength_ok,
@@ -341,7 +424,7 @@ def scan_buy_points(
     bp4_setup = bool(selected_bp4 and selected_bp4["setup"])
     if bp4_setup and selected_bp4:
         trend_ma_arr = ma10 if selected_bp4["ma_name"] == "MA10" else ma20
-        if _has_prior_pullback(closes, trend_ma_arr, idx, current_drops=drops):
+        if _has_prior_pullback(closes, trend_ma_arr, idx, current_drops=drops, lookback=idx - uptrend_start):
             bp4["manual_checks"].append("检测到此前已出现过回踩该均线，当前可能不是第一次回踩 → 禁止清单：不做第二次回踩")
             bp4_setup = False
     bp4_strength_ok = _next_strength_ok(next_row, amounts[idx])
@@ -351,8 +434,10 @@ def scan_buy_points(
         ma_stop = selected_bp4["trend_ma_val"] * STOP_LOSS_RATIO
         low_stop = lows[idx] * STOP_LOSS_RATIO
         bp4_stop = max(ma_stop, low_stop)
+        bp4_stop_basis = "trend_ma" if ma_stop >= low_stop else "pullback_low"
     else:
         bp4_stop = None
+        bp4_stop_basis = None
     bp4.update({
         "triggered": bp4_triggered,
         "setup_triggered": bp4_setup,
@@ -362,7 +447,10 @@ def scan_buy_points(
             "candidates": bp4_candidates,
             "consecutive_drops": drops,
             "gain_20d": round(float(gain_20d), 3),
+            "amount_vs_ma5_ratio": round(float(amounts[idx] / amount_ma5[idx]), 2) if not np.isnan(amount_ma5[idx]) and amount_ma5[idx] > 0 else None,
             "next_strength_ok": bp4_strength_ok,
+            "stop_loss_basis": bp4_stop_basis,
+            "stop_loss_rule": "均线价 × 0.99 与回踩低点 × 0.99 取更近的位置，不用更远止损放宽风险",
             "note": "趋势成熟阶段，买点优先级最低",
         },
         "stop_loss": round(float(bp4_stop), 2) if bp4_stop is not None else None,
@@ -382,4 +470,85 @@ def scan_buy_points(
     result["any_triggered"] = selected is not None
     result["triggered_list"] = [name for name, info in result["buy_points"].items() if info.get("triggered")]
     result["setup_list"] = [name for name, info in result["buy_points"].items() if info.get("setup_triggered")]
+
+    needs_strength = selected is not None and selected != "买点一_放量突破"
+    if needs_strength:
+        result["confirm_date"] = next_row["trade_date"] if next_row is not None else None
+        result["execution_date"] = next_next_row["trade_date"] if next_next_row is not None else None
+    else:
+        result["confirm_date"] = trade_date
+        result["execution_date"] = next_row["trade_date"] if next_row is not None else None
+
+
     return result
+
+
+def confirm_pending_buy_point(
+    ts_code: str,
+    setup_date: str,
+    confirm_date: str,
+    buy_point_name: str,
+    market_context: dict | None = None,
+    sector_context: dict | None = None,
+    core_context: dict | None = None,
+) -> dict:
+    """用 confirm_date 行情确认此前回踩 setup 是否转强。
+
+    本函数只确认买点二/三/四的 setup，不管理持仓或真实交易。
+    """
+    bp = scan_buy_points(
+        ts_code,
+        setup_date,
+        market_context=market_context,
+        sector_context=sector_context,
+        core_context=core_context,
+    )
+    if not bp.get("ok", True):
+        return {
+            "ok": False,
+            "ts_code": ts_code,
+            "buy_point": buy_point_name,
+            "setup_date": setup_date,
+            "confirm_date": confirm_date,
+            "status": "invalid",
+            "reason": bp.get("error", "买点扫描失败"),
+        }
+
+    info = bp.get("buy_points", {}).get(buy_point_name)
+    if info is None:
+        return {
+            "ok": False,
+            "ts_code": ts_code,
+            "buy_point": buy_point_name,
+            "setup_date": setup_date,
+            "confirm_date": confirm_date,
+            "status": "invalid",
+            "reason": "未知买点类型",
+        }
+
+    actual_confirm_date = bp.get("confirm_date")
+    if actual_confirm_date != confirm_date:
+        return {
+            "ok": True,
+            "ts_code": ts_code,
+            "buy_point": buy_point_name,
+            "setup_date": setup_date,
+            "confirm_date": actual_confirm_date,
+            "status": "pending_next_day_strength",
+            "reason": "确认日行情尚未覆盖到本次扫描日期",
+            "buy_scan": bp,
+        }
+
+    return {
+        "ok": True,
+        "ts_code": ts_code,
+        "buy_point": buy_point_name,
+        "setup_date": setup_date,
+        "confirm_date": actual_confirm_date,
+        "execution_date": bp.get("execution_date"),
+        "status": info.get("status"),
+        "triggered": info.get("triggered"),
+        "setup_triggered": info.get("setup_triggered"),
+        "buy_scan": bp,
+        "buy_point_info": info,
+    }

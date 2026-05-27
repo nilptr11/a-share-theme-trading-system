@@ -31,7 +31,7 @@ def _print_conditions(conditions: dict) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="A股交易系统每日扫描")
+    parser = argparse.ArgumentParser(description="A股主题选股每日扫描")
     parser.add_argument("date", nargs="?", default=None,
                         help="交易日期 YYYYMMDD，默认最近交易日")
     parser.add_argument("--sectors", type=int, default=15,
@@ -82,15 +82,21 @@ def main():
     if confirmed_stocks:
         print(f"确认核心强势股 ({len(confirmed_stocks)} 只):")
         for s in confirmed_stocks[:12]:
+            leader = s.get("leader_effect")
+            leader_str = "带动" if leader is True else ("未带动" if leader is False else "带动?")
             print(f"  {s['ts_code']:12s} {s.get('name') or '':8s} {s['pct_chg']:+.2f}%  "
                   f"满足 {s['condition_count']}/5  成交额排名 {s['amount_rank']}  "
-                  f"板块排名 {s.get('sector_amount_rank')}  换手 {s['turnover_rate']}%")
+                  f"板块排名 {s.get('sector_amount_rank')}  换手 {s['turnover_rate']}%  "
+                  f"带动性: {leader_str}")
         print()
     if watch_stocks:
         print(f"观察核心股 ({len(watch_stocks)} 只):")
         for s in watch_stocks[:8]:
+            leader = s.get("leader_effect")
+            leader_str = "带动" if leader is True else ("未带动" if leader is False else "带动?")
             print(f"  {s['ts_code']:12s} {s.get('name') or '':8s} {s['pct_chg']:+.2f}%  "
-                  f"满足 {s['condition_count']}/5  缺: {', '.join(s.get('missing_conditions', []))}")
+                  f"满足 {s['condition_count']}/5  缺: {', '.join(s.get('missing_conditions', []))}  "
+                  f"带动性: {leader_str}")
         print()
 
     pending = report.get("pending_confirmations", [])
@@ -107,14 +113,33 @@ def main():
 
     plans = report.get("executable_plans", [])
     if plans:
-        print(f"次日可执行预案 ({len(plans)} 只):")
+        print(f"可执行预案 ({len(plans)} 只):")
         for item in plans:
             execution = item.get("execution_check", {})
-            print(f"  {item['ts_code']}  {item['buy_point']}  状态 {item['status']}  "
-                  f"确认收盘 {item.get('close')}  止损参考 {item.get('stop_loss')}")
-            print(f"    执行条件: {execution.get('rule', '次日开盘 ±3% 内')}")
-            if item.get("risk_budget_note"):
-                print(f"    ⚠ 风险提示: {item['risk_budget_note']}")
+            dates = f"信号日 {item.get('setup_date') or '-'}  →  确认日 {item.get('confirm_date') or '-'}  →  计划买入日 {item.get('execution_date') or '-'}"
+            print(f"  {item['ts_code']}  {item['buy_point']}  状态 {item['status']}")
+            print(f"    {dates}")
+            print(f"    确认收盘 {item.get('close')}  止损参考 {item.get('stop_loss')}  "
+                  f"执行条件: {execution.get('rule', '次日开盘 ±3% 内')}")
+            if item.get("risk_budget_label"):
+                print(f"    风险预算: {item['risk_budget_label']}（{item.get('risk_budget_reason', '')}）")
+            failures = item.get("failure_signals", [])
+            if failures:
+                print(f"    失败信号: {' / '.join(failures[:3])}")
+        print()
+
+    trial_plans = report.get("trial_plans", [])
+    if trial_plans:
+        print(f"试错预案 ({len(trial_plans)} 只) — 主线未确认，仅买点一:")
+        for item in trial_plans:
+            execution = item.get("execution_check", {})
+            dates = f"信号日 {item.get('setup_date') or '-'}  →  确认日 {item.get('confirm_date') or '-'}  →  计划买入日 {item.get('execution_date') or '-'}"
+            print(f"  {item['ts_code']}  {item['buy_point']}  状态 {item['status']}")
+            print(f"    {dates}")
+            print(f"    确认收盘 {item.get('close')}  止损参考 {item.get('stop_loss')}  "
+                  f"执行条件: {execution.get('rule', '次日开盘 ±3% 内')}")
+            if item.get("risk_budget_label"):
+                print(f"    风险预算: {item['risk_budget_label']}（{item.get('risk_budget_reason', '')}）")
             failures = item.get("failure_signals", [])
             if failures:
                 print(f"    失败信号: {' / '.join(failures[:3])}")
