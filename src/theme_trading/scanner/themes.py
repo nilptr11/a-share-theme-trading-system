@@ -148,6 +148,10 @@ def find_main_themes(trade_date: str, min_days: int = THEME_STRONG_DAYS, top_n: 
         avg_5_amount = float(hist[amount_col].astype(float).tail(5).mean())
         amount_ratio = latest_amount / avg_5_amount if avg_5_amount > 0 else 1.0
 
+        # 成交额是否创近 5 日新高（逐一比较，不用均值）
+        recent_5_amounts = hist[amount_col].astype(float).tail(6).values
+        amount_5d_high = bool(len(recent_5_amounts) >= 6 and latest_amount > max(recent_5_amounts[:-1]))
+
         consecutive = 0
         for _, hrow in hist.iloc[::-1].iterrows():
             h_pct = float(hrow["pct_change"])
@@ -205,6 +209,7 @@ def find_main_themes(trade_date: str, min_days: int = THEME_STRONG_DAYS, top_n: 
             "amount_col": amount_col,
             "vol_ratio": round(amount_ratio, 2),
             "amount_ratio": round(amount_ratio, 2),
+            "amount_5d_high": amount_5d_high,
             "up_in_sector": up_in_sector,
             "ladder_height": ladder_height,
             "top_amount_members": top_amount_members,
