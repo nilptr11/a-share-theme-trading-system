@@ -23,19 +23,19 @@ def _n_days_after(date_str: str, n: int) -> str:
     return (datetime.strptime(date_str, "%Y%m%d") + timedelta(days=n)).strftime("%Y%m%d")
 
 
-def _find_uptrend_start(closes: np.ndarray, ma20: np.ndarray, today: int) -> int:
+def _find_uptrend_start(closes: np.ndarray, ma20: np.ndarray, today: int) -> tuple[int, bool]:
     """找到最近一次主升启动日索引。
 
     从 today 向前扫描，找收盘价从 MA20 下方突破且 MA20 向上的日期。
-    若未找到明确突破点，退化为 today - 30。
+    若未找到明确突破点，退化为 today - 30，并返回 fallback 标记。
     """
     search_start = max(today - 60, 0)
     for i in range(today - 1, search_start, -1):
         if np.isnan(ma20[i]) or np.isnan(ma20[i - 1]):
             continue
         if closes[i - 1] < ma20[i - 1] and closes[i] > ma20[i] and ma20[i] > ma20[i - 1]:
-            return i
-    return max(today - 30, 0)
+            return i, False
+    return max(today - 30, 0), True
 
 
 def _empty_point(priority: int, manual_checks: list[str] | None = None) -> dict:
@@ -236,7 +236,7 @@ def scan_buy_points(
         "manual_checks": common_manual,
     }
 
-    uptrend_start = _find_uptrend_start(closes, ma20, idx)
+    uptrend_start, uptrend_start_fallback = _find_uptrend_start(closes, ma20, idx)
 
     sector_pct = sector_context.get("pct_chg") if sector_context else None
     sector_amount_ratio = sector_context.get("amount_ratio") or sector_context.get("vol_ratio") if sector_context else None
@@ -311,6 +311,8 @@ def scan_buy_points(
         bp2["manual_checks"].append("买点二板块成交额未跌破 5 日均值需人工确认")
 
     bp2_setup = above_ma5_3d and ma5_up and drops >= 2 and near_ma5 and amount_shrink and above_ma5 and sector_amount_ok and not volume_down_invalid
+    if uptrend_start_fallback and bp2_setup:
+        bp2["manual_checks"].append("未找到明确主升启动日，第一次回踩仅回看近 30 日，需人工确认此前是否已有回踩 5 日线")
     is_second_pullback_bp2 = _has_prior_pullback(closes, ma5, idx, current_drops=drops, lookback=idx - uptrend_start)
     if is_second_pullback_bp2:
         bp2["manual_checks"].append("检测到此前已出现过回踩 5 日线，当前可能不是第一次回踩 → 禁止清单：不做第二次回踩")
@@ -424,6 +426,8 @@ def scan_buy_points(
     bp4_setup = bool(selected_bp4 and selected_bp4["setup"])
     if bp4_setup and selected_bp4:
         trend_ma_arr = ma10 if selected_bp4["ma_name"] == "MA10" else ma20
+        if uptrend_start_fallback:
+            bp4["manual_checks"].append("未找到明确主升启动日，第一次回踩仅回看近 30 日，需人工确认此前是否已有回踩趋势均线")
         if _has_prior_pullback(closes, trend_ma_arr, idx, current_drops=drops, lookback=idx - uptrend_start):
             bp4["manual_checks"].append("检测到此前已出现过回踩该均线，当前可能不是第一次回踩 → 禁止清单：不做第二次回踩")
             bp4_setup = False
@@ -433,6 +437,7 @@ def scan_buy_points(
     if selected_bp4:
         ma_stop = selected_bp4["trend_ma_val"] * STOP_LOSS_RATIO
         low_stop = lows[idx] * STOP_LOSS_RATIO
+        # 止损价越高，离当前价越近；这里取更紧的风险参考位。
         bp4_stop = max(ma_stop, low_stop)
         bp4_stop_basis = "trend_ma" if ma_stop >= low_stop else "pullback_low"
     else:

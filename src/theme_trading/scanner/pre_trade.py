@@ -79,8 +79,8 @@ def pre_trade_checklist(
 
     # 所有检查均为可自动判断项
     result["all_passed"] = all(
-        v is not False
-        for k, v in result["checks"].items()
+        v is True
+        for v in result["checks"].values()
     )
 
     # ── 三个必答问题 ──

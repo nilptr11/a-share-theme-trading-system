@@ -153,10 +153,18 @@ def daily_scan(
             })
             continue
 
-        stock = stock_by_code.get(ts_code, {"ts_code": ts_code, "status": pending.get("core_status")})
+        stock = stock_by_code.get(ts_code) or {
+            "ts_code": ts_code,
+            "name": pending.get("name"),
+            "sector_code": pending.get("sector_code"),
+            "status": pending.get("core_status"),
+            "amount_rank": pending.get("amount_rank"),
+            "conditions": pending.get("conditions", {}),
+        }
         sector_context = theme_by_code.get(pending.get("sector_code") or stock.get("sector_code"))
         stock_score = score
         if sector_context and check_sector_climax(sector_context)["climax"]:
+            # pending 回看也继承板块高潮约束，仅影响该板块内追涨风险判断。
             stock_score = dict(score)
             stock_score["emotion_extreme"] = True
 
@@ -294,6 +302,11 @@ def daily_scan(
         info = bp["buy_points"][selected]
         signal = {
             "ts_code": stock["ts_code"],
+            "name": stock.get("name"),
+            "sector_code": stock.get("sector_code"),
+            "core_status": stock.get("status"),
+            "amount_rank": stock.get("amount_rank"),
+            "conditions": stock.get("conditions", {}),
             "plan_type": "trial" if trial_mode else "standard",
             "buy_point": selected,
             "status": info.get("status"),

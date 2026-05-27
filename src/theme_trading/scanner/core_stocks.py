@@ -276,6 +276,8 @@ def filter_core_stocks(trade_date: str, sector_codes: list[str] = None) -> dict:
         leader_effect, leader_note = _leader_effect_approximation(ts_code, sector_code, hist, sector_members)
         if leader_effect is None:
             manual_checks.append(f"带动性: {leader_note}")
+        elif leader_effect is False:
+            manual_checks.append(f"带动性不足: {leader_note}")
 
         conditions = {
             "amount_rank_core": amount_condition,
