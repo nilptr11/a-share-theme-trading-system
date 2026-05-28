@@ -7,6 +7,7 @@ import pandas as pd
 from theme_trading.scanner.core_stocks import _leader_effect_approximation, _relative_strength
 from theme_trading.scanner.sell_rules import evaluate_must_sell
 from theme_trading.scanner.signals import build_signal_from_buy_scan
+from theme_trading.scanner.pre_trade import pre_trade_checklist
 from theme_trading.scanner.daily_scan import daily_scan
 from theme_trading.scanner.buy_point_rules import rate_buy_point_strength
 from theme_trading.scanner.utils import _select_highest_priority_buy_point
@@ -64,6 +65,24 @@ class SignalLayeringTest(unittest.TestCase):
 
         self.assertEqual(result["strength_level"], "strong")
         self.assertEqual(result["strength_score"], 7)
+
+    def test_pre_trade_check_accepts_numpy_bool_values(self):
+        result = pre_trade_checklist(
+            market_context={"score": 6},
+            theme_context={"status": "confirmed"},
+            core_stock={"ts_code": "000001.SZ", "name": "测试股", "status": "confirmed_core"},
+            buy_point_info={
+                "triggered": np.bool_(True),
+                "setup_triggered": False,
+                "stop_loss": 9.5,
+                "details": {},
+                "failure_signals": [],
+            },
+            buy_point_name="买点一_放量突破",
+        )
+
+        self.assertTrue(result["all_passed"])
+        self.assertTrue(result["checks"]["valid_buy_point"])
 
     def test_selector_skips_invalid_high_priority_buy_point(self):
         selected, suppressed = _select_highest_priority_buy_point({

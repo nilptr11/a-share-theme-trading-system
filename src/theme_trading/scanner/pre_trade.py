@@ -78,10 +78,7 @@ def pre_trade_checklist(
         result["block_reasons"].append("止损位不明确")
 
     # 所有检查均为可自动判断项
-    result["all_passed"] = all(
-        v is True
-        for v in result["checks"].values()
-    )
+    result["all_passed"] = all(bool(v) for v in result["checks"].values())
 
     # ── 三个必答问题 ──
     result["three_questions"] = _build_three_questions(
