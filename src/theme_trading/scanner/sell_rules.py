@@ -37,6 +37,7 @@ def evaluate_must_sell(
         "must_sell": False,
         "triggered_signals": [],
         "market_deterioration_signals": [],
+        "diagnostic_signals": [],
         "human_judgment": [],
     }
 
@@ -65,9 +66,9 @@ def evaluate_must_sell(
     ma5_val = ma5[idx] if not np.isnan(ma5[idx]) else None
     ma10_val = ma10[idx] if not np.isnan(ma10[idx]) else None
     if ma5_val is not None and closes[idx] < ma5_val:
-        result["triggered_signals"].append("收盘跌破 5 日线")
+        result["diagnostic_signals"].append("持仓诊断：收盘跌破 5 日线，关注是否叠加放量下跌、板块走弱或止损位失守")
     if ma10_val is not None and closes[idx] < ma10_val:
-        result["triggered_signals"].append("收盘跌破 10 日线")
+        result["diagnostic_signals"].append("持仓诊断：收盘跌破 10 日线，关注趋势是否继续转弱")
 
     if idx > 0:
         pct = (closes[idx] - closes[idx - 1]) / closes[idx - 1] if closes[idx - 1] > 0 else 0
@@ -141,7 +142,7 @@ def evaluate_reduce_or_sell(
 
     ma5_val = ma5[idx] if not np.isnan(ma5[idx]) else None
     if ma5_val is not None and closes[idx] < ma5_val:
-        result["signals"].append("技术弱：收盘跌破 5 日线")
+        result["signals"].append("技术弱：收盘跌破 5 日线（单独不构成必须卖出）")
 
     if idx >= 3:
         recent_high = float(np.max(highs[idx - 3:idx]))
@@ -285,6 +286,7 @@ def scan_sell_points(
         "action": action,
         "reasons": reasons,
         "must_sell": must,
+        "diagnostic_signals": must.get("diagnostic_signals", []),
         "reduce_or_sell": reduce_,
         "active_profit_taking": profit,
         "liquidity_risk": liquidity,

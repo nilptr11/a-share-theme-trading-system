@@ -65,6 +65,9 @@ def build_signal_from_pending_review(
         "execution_check": info.get("execution_check"),
         "failure_signals": info.get("failure_signals", []),
         "manual_checks": info.get("manual_checks", []),
+        "strength_score": info.get("strength_score"),
+        "strength_level": info.get("strength_level"),
+        "strength_reasons": info.get("strength_reasons", []),
         "suppressed_by_priority": bp.get("suppressed_by_priority", []),
         "source": "pending_setup_review",
     }
@@ -108,6 +111,9 @@ def build_signal_from_buy_scan(
         "execution_check": info.get("execution_check"),
         "failure_signals": info.get("failure_signals", []),
         "manual_checks": info.get("manual_checks", []),
+        "strength_score": info.get("strength_score"),
+        "strength_level": info.get("strength_level"),
+        "strength_reasons": info.get("strength_reasons", []),
         "suppressed_by_priority": buy_scan.get("suppressed_by_priority", []),
     }
     return _attach_risk_and_checklist(

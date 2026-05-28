@@ -13,6 +13,7 @@ def new_daily_report(trade_date: str) -> DailyScanReport:
         "buy_scans": [],
         "observation_pool": [],
         "pending_confirmations": [],
+        "watch_buy_shapes": [],
         "executable_plans": [],
         "trial_plans": [],
         "pending_reviews": [],

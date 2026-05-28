@@ -94,9 +94,21 @@ BUY_POINT_PRIORITY = {
     "买点四_趋势均线": 4,
 }
 
+SELECTABLE_BUY_POINT_STATUSES = {
+    "executable_plan",
+    "pending_next_open",
+    "pending_next_day_strength",
+    "watch",
+}
+
 
 def _select_highest_priority_buy_point(buy_points: dict) -> tuple[str | None, list[str]]:
-    triggered = [name for name, info in buy_points.items() if info.get("triggered") or info.get("setup_triggered")]
+    triggered = [
+        name
+        for name, info in buy_points.items()
+        if (info.get("triggered") or info.get("setup_triggered"))
+        and info.get("status") in SELECTABLE_BUY_POINT_STATUSES
+    ]
     if not triggered:
         return None, []
     selected = sorted(triggered, key=lambda name: BUY_POINT_PRIORITY.get(name, 99))[0]

@@ -44,6 +44,8 @@ class CoreStockItem(TypedDict, total=False):
     turnover_rate: float | None
     conditions: JsonDict
     missing_conditions: list[str]
+    relative_strength_evidence: JsonDict
+    leader_effect_evidence: JsonDict
 
 
 class BuyPointInfo(TypedDict, total=False):
@@ -56,6 +58,9 @@ class BuyPointInfo(TypedDict, total=False):
     execution_check: JsonDict
     failure_signals: list[str]
     manual_checks: list[str]
+    strength_score: int
+    strength_level: str
+    strength_reasons: list[str]
 
 
 class BuyPointScanResult(TypedDict, total=False):
@@ -103,6 +108,9 @@ class TradeSignal(TypedDict, total=False):
     execution_check: JsonDict | None
     failure_signals: list[str]
     manual_checks: list[str]
+    strength_score: int | None
+    strength_level: str | None
+    strength_reasons: list[str]
     suppressed_by_priority: list[str]
     source: NotRequired[str]
     pre_trade_check: JsonDict
@@ -121,6 +129,7 @@ class DailyScanReport(TypedDict, total=False):
     buy_scans: list[JsonDict]
     observation_pool: list[JsonDict]
     pending_confirmations: list[JsonDict]
+    watch_buy_shapes: list[JsonDict]
     executable_plans: list[TradeSignal]
     trial_plans: list[TradeSignal]
     pending_reviews: list[JsonDict]

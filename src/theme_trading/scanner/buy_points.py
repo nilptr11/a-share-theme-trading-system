@@ -11,6 +11,7 @@ from .buy_point_rules import (
     evaluate_pullback_buy_point,
     evaluate_trend_ma_buy_point,
     execution_check,
+    rate_buy_point_strength,
     find_uptrend_start,
     is_platform_consolidation,
     n_days_after,
@@ -30,6 +31,7 @@ _consecutive_drops = consecutive_drops
 _near_ma_in_pullback = near_ma_in_pullback
 _pullback_has_volume_down = pullback_has_volume_down
 _status_for_setup = status_for_setup
+_rate_buy_point_strength = rate_buy_point_strength
 
 
 def scan_buy_points(
@@ -161,6 +163,7 @@ def scan_buy_points(
     )
 
     for name, info in result["buy_points"].items():
+        info.update(_rate_buy_point_strength(name, info))
         needs_strength = name != "买点一_放量突破"
         info["confirm_date"] = next_row["trade_date"] if needs_strength and next_row is not None else trade_date
         info["execution_date"] = next_next_row["trade_date"] if needs_strength and next_next_row is not None else (next_row["trade_date"] if next_row is not None else None)

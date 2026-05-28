@@ -4,6 +4,37 @@ from theme_trading.cli.labels import format_condition_labels
 from theme_trading.scanner import format_score_report
 
 
+_STRENGTH_LABELS = {"weak": "弱", "medium": "中", "strong": "强"}
+
+
+def _format_strength(item: dict) -> str | None:
+    level = item.get("strength_level")
+    score = item.get("strength_score")
+    if level is None or score is None:
+        return None
+    label = _STRENGTH_LABELS.get(level, level)
+    reasons = item.get("strength_reasons", [])
+    reason_text = "；".join(reasons[:3])
+    return f"强度: {label} {score}分" + (f"；{reason_text}" if reason_text else "")
+
+
+def _format_core_evidence(stock: dict) -> str | None:
+    rel = stock.get("relative_strength_evidence") or {}
+    leader = stock.get("leader_effect_evidence") or {}
+    parts = []
+    if rel.get("recent_days"):
+        parts.append(
+            f"分歧抗跌 {rel.get('defensive_days', 0)}/{rel.get('divergence_days', 0)}，"
+            f"修复领先 {rel.get('leading_repair_days', 0)}/{rel.get('repair_days', 0)}"
+        )
+    if leader.get("up_breadth") is not None and leader.get("down_breadth") is not None:
+        parts.append(
+            f"上涨日板块均涨 {leader.get('up_sector_avg'):+.2f}% / 广度 {leader.get('up_breadth'):.0%}，"
+            f"下跌日 {leader.get('down_sector_avg'):+.2f}% / 广度 {leader.get('down_breadth'):.0%}"
+        )
+    return "；".join(parts) if parts else None
+
+
 def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None) -> str:
     lines: list[str] = []
     lines.append(format_score_report(report["market_score"]))
@@ -47,6 +78,9 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
                 f"板块排名 {s.get('sector_amount_rank')}  换手 {s['turnover_rate']}%  "
                 f"带动性: {leader_str}"
             )
+            evidence = _format_core_evidence(s)
+            if evidence:
+                lines.append(f"    证据: {evidence}")
         lines.append("")
     if watch_stocks:
         lines.append(f"观察核心股 ({len(watch_stocks)} 只):")
@@ -58,6 +92,9 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
                 f"满足 {s['condition_count']}/5  缺: {format_condition_labels(s.get('missing_conditions', []))}  "
                 f"带动性: {leader_str}"
             )
+            evidence = _format_core_evidence(s)
+            if evidence:
+                lines.append(f"    证据: {evidence}")
         lines.append("")
 
     pending = report.get("pending_confirmations", [])
@@ -65,12 +102,17 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
         lines.append(f"待确认 ({len(pending)} 项):")
         for item in pending[:12]:
             if "buy_point" in item:
-                lines.append(f"  {item['ts_code']} {item['buy_point']}  状态 {item['status']}  止损参考 {item.get('stop_loss')}")
+                strength = _format_strength(item)
+                strength_text = f"  {strength}" if strength else ""
+                lines.append(f"  {item['ts_code']} {item['buy_point']}  状态 {item['status']}  止损参考 {item.get('stop_loss')}{strength_text}")
                 for check in item.get("manual_checks", [])[:2]:
                     lines.append(f"    ? {check}")
             else:
                 lines.append(f"  {item.get('ts_code', '-')}: {item.get('reason', item)}")
         lines.append("")
+
+    _append_watch_buy_shapes(lines, report.get("watch_buy_shapes", []))
+    _append_invalid_buy_setups(lines, report.get("observation_pool", []))
 
     _append_plans(lines, "可执行预案", report.get("executable_plans", []))
     _append_plans(lines, "试错预案", report.get("trial_plans", []), suffix=" — 主线未确认，仅买点一")
@@ -125,6 +167,54 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
     return "\n".join(lines)
 
 
+def _append_watch_buy_shapes(lines: list[str], items: list[dict]) -> None:
+    if not items:
+        return
+    lines.append(f"观察买点形态 / 即将确认（{len(items)} 项，仅观察，不生成正式预案）:")
+    for item in items[:12]:
+        strength = _format_strength(item)
+        lines.append(
+            f"  {item['ts_code']} {item.get('name') or ''}  {item['buy_point']}  "
+            f"状态 {item.get('status')}  止损参考 {item.get('stop_loss')}  "
+            f"主线 {item.get('theme_name')}({item.get('theme_condition_count')}/5)"
+        )
+        if strength:
+            lines.append(f"    {strength}")
+        missing = item.get("theme_missing_conditions", [])
+        if missing:
+            lines.append(f"    主线缺: {format_condition_labels(missing)}")
+        lines.append(f"    {item.get('reason')}")
+    lines.append("")
+
+
+def _append_invalid_buy_setups(lines: list[str], observation_pool: list[dict]) -> None:
+    items = [item for item in observation_pool if item.get("category") == "invalid_buy_setup"]
+    if not items:
+        return
+    lines.append(f"已失效买点形态 ({len(items)} 项，仅诊断，不生成预案):")
+    for item in items[:12]:
+        strength = _format_strength(item)
+        execution = item.get("execution_check") or {}
+        gap = execution.get("gap_check") or {}
+        gap_text = ""
+        if gap.get("checked"):
+            gap_pct = gap.get("gap_pct")
+            gap_text = f"  开盘偏离 {gap_pct:+.1%}" if gap_pct is not None else "  开盘偏离已检查"
+            if gap.get("passed") is False:
+                gap_text += "，超出执行范围"
+        lines.append(
+            f"  {item['ts_code']} {item.get('name') or ''}  {item['buy_point']}  "
+            f"状态 {item.get('status')}  止损参考 {item.get('stop_loss')}{gap_text}"
+        )
+        if strength:
+            lines.append(f"    {strength}")
+        failures = item.get("failure_signals", [])
+        if failures:
+            lines.append(f"    失败信号: {' / '.join(failures[:3])}")
+        lines.append(f"    {item.get('reason')}")
+    lines.append("")
+
+
 def _append_plans(lines: list[str], title: str, plans: list[dict], suffix: str = "") -> None:
     if not plans:
         return
@@ -138,6 +228,9 @@ def _append_plans(lines: list[str], title: str, plans: list[dict], suffix: str =
             f"    确认收盘 {item.get('close')}  止损参考 {item.get('stop_loss')}  "
             f"执行条件: {execution.get('rule', '次日开盘 ±3% 内')}"
         )
+        strength = _format_strength(item)
+        if strength:
+            lines.append(f"    {strength}")
         if item.get("risk_budget_label"):
             lines.append(f"    风险预算: {item['risk_budget_label']}（{item.get('risk_budget_reason', '')}）")
         failures = item.get("failure_signals", [])

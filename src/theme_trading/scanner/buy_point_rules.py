@@ -165,6 +165,89 @@ def status_for_setup(setup: bool, next_row, confirm_close: float, needs_strength
     return True, "executable_plan", execution
 
 
+def _strength_level(score: int) -> str:
+    if score >= 5:
+        return "strong"
+    if score >= 3:
+        return "medium"
+    return "weak"
+
+
+def _bool_reason(score: int, reasons: list[str], passed: bool, reason: str) -> int:
+    if passed:
+        reasons.append(reason)
+        return score + 1
+    return score
+
+
+def rate_buy_point_strength(name: str, info: dict) -> dict:
+    details = info.get("details", {})
+    reasons: list[str] = []
+    score = 0
+
+    if not info.get("setup_triggered") and not info.get("triggered"):
+        return {"strength_score": 0, "strength_level": "weak", "strength_reasons": []}
+
+    score = _bool_reason(score, reasons, bool(info.get("setup_triggered")), "买点形态成立")
+    status = info.get("status")
+    score = _bool_reason(score, reasons, status in ("pending_next_open", "executable_plan"), "已进入可计划状态")
+
+    if name == "买点一_放量突破":
+        amount_ratio = details.get("amount_ratio") or 0
+        range_pct = details.get("consolidation_5d_range")
+        if amount_ratio >= 1.5:
+            reasons.append(f"放量 {amount_ratio:.1f} 倍")
+            score += 1
+        if amount_ratio >= 2.0:
+            reasons.append("放量超过 2 倍")
+            score += 1
+        if range_pct is not None and range_pct <= 0.03:
+            reasons.append(f"平台收敛 {range_pct:.1%}")
+            score += 1
+        score = _bool_reason(score, reasons, bool(details.get("close_confirm")), "收盘确认突破")
+        score = _bool_reason(score, reasons, bool(details.get("sector_follow")), "板块跟随")
+    elif name == "买点二_主升回踩":
+        score = _bool_reason(score, reasons, bool(details.get("ma5_up")), "MA5 上行")
+        score = _bool_reason(score, reasons, bool(details.get("near_ma5")) and bool(details.get("above_ma5")), "缩量回踩 MA5 不破")
+        prev_ratio = details.get("amount_vs_prev_ratio")
+        ma5_ratio = details.get("amount_vs_ma5_ratio")
+        if (prev_ratio is not None and prev_ratio <= 0.7) or (ma5_ratio is not None and ma5_ratio <= 0.8):
+            reasons.append("回踩明显缩量")
+            score += 1
+        score = _bool_reason(score, reasons, bool(details.get("next_strength_ok")), "次日转强确认")
+        score = _bool_reason(score, reasons, bool(details.get("sector_amount_ok")), "板块成交额配合")
+        score = _bool_reason(score, reasons, not bool(details.get("volume_down_invalid")), "未出现放量下跌")
+    elif name == "买点三_突破确认":
+        score = _bool_reason(score, reasons, bool(details.get("recent_60d_high")), "近期突破 60 日高点")
+        ratio = details.get("amount_vs_breakout_ratio")
+        if ratio is not None and ratio <= 0.6:
+            reasons.append(f"回踩量缩至突破日 {ratio:.1f}")
+            score += 1
+        score = _bool_reason(score, reasons, bool(details.get("above_breakout")), "回踩不破突破位")
+        score = _bool_reason(score, reasons, bool(details.get("next_strength_ok")), "次日转强确认")
+        score = _bool_reason(score, reasons, bool(details.get("sector_not_weak")), "板块未走弱")
+    elif name == "买点四_趋势均线":
+        selected = None
+        for candidate in details.get("candidates", []):
+            if candidate.get("ma_name") == details.get("selected_ma"):
+                selected = candidate
+                break
+        selected = selected or (details.get("candidates", [])[:1] or [None])[0]
+        if selected:
+            score = _bool_reason(score, reasons, bool(selected.get("trend_ma_up")), f"{selected.get('ma_name')} 上行")
+            score = _bool_reason(score, reasons, bool(selected.get("along_ma_10d")), "10 日沿趋势均线运行")
+            score = _bool_reason(score, reasons, bool(selected.get("near_trend_ma")) and bool(selected.get("above_ma")), "缩量回踩趋势均线不破")
+            score = _bool_reason(score, reasons, bool(selected.get("amount_shrink")), "回踩缩量")
+            score = _bool_reason(score, reasons, bool(selected.get("gain_ok")), "近 20 日涨幅未过热")
+        score = _bool_reason(score, reasons, bool(details.get("next_strength_ok")), "次日转强确认")
+
+    return {
+        "strength_score": score,
+        "strength_level": _strength_level(score),
+        "strength_reasons": reasons[:4],
+    }
+
+
 def evaluate_breakout_buy_point(
     *,
     highs: np.ndarray,
@@ -285,7 +368,7 @@ def evaluate_pullback_buy_point(
         "execution_check": execution,
         "failure_signals": [
             "回调变成放量下跌",
-            "收盘跌破止损位",
+            "收盘跌破止损位，而非单日轻微跌破 MA5",
             "反弹日成交额 < 5 日均额 90%",
             "板块核心股集体走弱",
         ],
@@ -430,8 +513,8 @@ def evaluate_trend_ma_buy_point(
         "stop_loss": round(float(stop_loss), 2) if stop_loss is not None else None,
         "execution_check": execution,
         "failure_signals": [
-            f"收盘跌破均线 × {STOP_LOSS_RATIO}",
-            "放量跌破均线",
+            "放量跌破趋势均线",
+            "收盘跌破止损位，而非单日轻微跌破趋势均线",
             "反弹无力，次日继续下跌",
             "板块核心股集体走弱",
         ],

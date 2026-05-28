@@ -119,24 +119,47 @@ def _top_20pct_days(ts_code: str, sector_code: str | None, hist: pd.DataFrame | 
     return count
 
 
-def _relative_strength(ts_code: str, sector_code: str | None, hist: pd.DataFrame | None, sector_members: dict) -> bool | None:
+def _relative_strength(ts_code: str, sector_code: str | None, hist: pd.DataFrame | None, sector_members: dict) -> tuple[bool | None, dict]:
+    empty_evidence = {
+        "recent_days": 0,
+        "divergence_days": 0,
+        "defensive_days": 0,
+        "repair_days": 0,
+        "leading_repair_days": 0,
+        "reason": "数据不足",
+    }
     if hist is None or not sector_code or sector_code not in sector_members:
-        return None
-    sector_hist = hist[hist["ts_code"].isin(sector_members[sector_code])].copy()
+        return None, empty_evidence
+    peer_codes = set(sector_members[sector_code]) - {ts_code}
+    if not peer_codes:
+        return None, {**empty_evidence, "reason": "无同板块其它个股数据"}
+
+    sector_hist = hist[hist["ts_code"].isin(peer_codes)].copy()
     stock_hist = hist[hist["ts_code"] == ts_code].copy()
     if sector_hist.empty or stock_hist.empty:
-        return None
+        return None, {**empty_evidence, "reason": "同板块其它个股数据不足"}
 
     recent_sector = sector_hist.groupby("trade_date")["pct_chg"].mean().tail(CORE_RECENT_DAYS)
     recent_stock = stock_hist.set_index("trade_date")["pct_chg"].astype(float).reindex(recent_sector.index)
-    if recent_stock.isna().all():
-        return None
+    if recent_stock.isna().all() or recent_sector.isna().any():
+        return None, {**empty_evidence, "reason": "相对强度对照数据不足"}
 
     divergence_days = recent_sector[recent_sector < 0].index
     repair_days = recent_sector[recent_sector > 0].index
-    defensive = True if len(divergence_days) == 0 else bool((recent_stock.loc[divergence_days] >= recent_sector.loc[divergence_days]).all())
-    leading_repair = True if len(repair_days) == 0 else bool((recent_stock.loc[repair_days] >= recent_sector.loc[repair_days]).any())
-    return defensive and leading_repair
+    defensive_days = int((recent_stock.loc[divergence_days] >= recent_sector.loc[divergence_days]).sum()) if len(divergence_days) else 0
+    leading_repair_days = int((recent_stock.loc[repair_days] >= recent_sector.loc[repair_days]).sum()) if len(repair_days) else 0
+    defensive = True if len(divergence_days) == 0 else defensive_days == len(divergence_days)
+    leading_repair = True if len(repair_days) == 0 else leading_repair_days > 0
+    evidence = {
+        "recent_days": int(len(recent_sector)),
+        "divergence_days": int(len(divergence_days)),
+        "defensive_days": defensive_days,
+        "repair_days": int(len(repair_days)),
+        "leading_repair_days": leading_repair_days,
+        "defensive": defensive,
+        "leading_repair": leading_repair,
+    }
+    return defensive and leading_repair, evidence
 
 
 def _avg_amount(ts_code: str, hist: pd.DataFrame | None, fallback: float) -> float:
@@ -148,42 +171,54 @@ def _avg_amount(ts_code: str, hist: pd.DataFrame | None, fallback: float) -> flo
     return float(stock_hist["amount"].astype(float).mean())
 
 
-def _leader_effect_approximation(ts_code: str, sector_code: str | None, hist: pd.DataFrame | None, sector_members: dict) -> tuple[bool | None, str]:
-    """近似判断个股对同板块的带动效应。
-
-    比较近 5 日个股上涨日 vs 下跌日对应的板块平均涨幅。
-    若个股上涨日板块平均涨幅 > 下跌日，且上涨日板块上涨家数占比 > 下跌日，则判定有带动效应。
-    """
+def _leader_effect_approximation(ts_code: str, sector_code: str | None, hist: pd.DataFrame | None, sector_members: dict) -> tuple[bool | None, str, dict]:
+    """近似判断个股对同板块的带动效应。"""
+    empty_evidence = {
+        "stock_up_days": 0,
+        "stock_down_days": 0,
+        "up_sector_avg": None,
+        "down_sector_avg": None,
+        "up_breadth": None,
+        "down_breadth": None,
+    }
     if hist is None or not sector_code or sector_code not in sector_members:
-        return None, "带动性需人工确认（数据不足）"
+        return None, "带动性需人工确认（数据不足）", empty_evidence
 
-    sector_hist = hist[hist["ts_code"].isin(sector_members[sector_code])].copy()
+    peer_codes = set(sector_members[sector_code]) - {ts_code}
+    if not peer_codes:
+        return None, "带动性需人工确认（无同板块其它个股数据）", empty_evidence
+
+    sector_hist = hist[hist["ts_code"].isin(peer_codes)].copy()
     stock_hist = hist[hist["ts_code"] == ts_code].copy()
     if sector_hist.empty or stock_hist.empty or "pct_chg" not in sector_hist.columns:
-        return None, "带动性需人工确认（数据不足）"
+        return None, "带动性需人工确认（同板块其它个股数据不足）", empty_evidence
 
     recent_stock = stock_hist.sort_values("trade_date").tail(5).copy()
     if len(recent_stock) < 3:
-        return None, "带动性需人工确认（近 5 日数据不足）"
+        return None, "带动性需人工确认（近 5 日数据不足）", empty_evidence
 
     up_dates = set(recent_stock[recent_stock["pct_chg"].astype(float) > 0]["trade_date"])
     down_dates = set(recent_stock[recent_stock["pct_chg"].astype(float) <= 0]["trade_date"])
+    evidence = {**empty_evidence, "stock_up_days": len(up_dates), "stock_down_days": len(down_dates)}
 
     if not up_dates or not down_dates:
-        return None, "带动性需人工确认（涨跌方向单一）"
+        return None, "带动性需人工确认（涨跌方向单一）", evidence
 
     sector_recent = sector_hist[sector_hist["trade_date"].isin(set(recent_stock["trade_date"]))]
     if sector_recent.empty:
-        return None, "带动性需人工确认（板块数据缺失）"
+        return None, "带动性需人工确认（板块数据缺失）", evidence
 
-    up_sector_avg = float(sector_recent[sector_recent["trade_date"].isin(up_dates)]["pct_chg"].astype(float).mean())
-    down_sector_avg = float(sector_recent[sector_recent["trade_date"].isin(down_dates)]["pct_chg"].astype(float).mean())
+    up_sector = sector_recent[sector_recent["trade_date"].isin(up_dates)]
+    down_sector = sector_recent[sector_recent["trade_date"].isin(down_dates)]
+    if up_sector.empty or down_sector.empty:
+        return None, "带动性需人工确认（上涨/下跌对照日期板块数据不足）", evidence
 
-    if up_sector_avg <= down_sector_avg:
-        return False, "个股上涨时板块平均涨幅未高于下跌时，未见明显带动效应"
+    up_sector_avg = float(up_sector["pct_chg"].astype(float).mean())
+    down_sector_avg = float(down_sector["pct_chg"].astype(float).mean())
+    if not np.isfinite(up_sector_avg) or not np.isfinite(down_sector_avg):
+        return None, "带动性需人工确认（上涨/下跌对照均值无效）", evidence
 
     def _day_breadth(dates, df):
-        """每日板块上涨家数占比，再跨日取均值。"""
         ratios = []
         for d in dates:
             day_df = df[df["trade_date"] == d]
@@ -193,11 +228,20 @@ def _leader_effect_approximation(ts_code: str, sector_code: str | None, hist: pd
 
     up_breadth = _day_breadth(up_dates, sector_recent)
     down_breadth = _day_breadth(down_dates, sector_recent)
+    evidence.update({
+        "up_sector_avg": round(up_sector_avg, 2),
+        "down_sector_avg": round(down_sector_avg, 2),
+        "up_breadth": up_breadth,
+        "down_breadth": down_breadth,
+    })
+
+    if up_sector_avg <= down_sector_avg:
+        return False, "个股上涨时板块平均涨幅未高于下跌时，未见明显带动效应", evidence
 
     if up_breadth > down_breadth:
-        return True, f"个股上涨日板块平均涨幅 {up_sector_avg:+.2f}% > 下跌日 {down_sector_avg:+.2f}%，上涨日板块广度 {up_breadth:.0%} > 下跌日 {down_breadth:.0%}（近似判断）"
+        return True, f"个股上涨日板块平均涨幅 {up_sector_avg:+.2f}% > 下跌日 {down_sector_avg:+.2f}%，上涨日板块广度 {up_breadth:.0%} > 下跌日 {down_breadth:.0%}（近似判断）", evidence
     else:
-        return None, "个股上涨日板块广度未明显扩散，带动性不确定"
+        return None, "个股上涨日板块广度未明显扩散，带动性不确定", evidence
 
 
 def filter_core_stocks(trade_date: str, sector_codes: list[str] = None) -> dict:
@@ -256,7 +300,7 @@ def filter_core_stocks(trade_date: str, sector_codes: list[str] = None) -> dict:
             continue
 
         top_20pct_days = _top_20pct_days(ts_code, sector_code, hist, sector_members)
-        relative_strength = _relative_strength(ts_code, sector_code, hist, sector_members)
+        relative_strength, relative_strength_evidence = _relative_strength(ts_code, sector_code, hist, sector_members)
         technical = _stock_technical(ts_code, hist)
         manual_checks = ["是否真正带动同板块个股需人工结合分时和板块扩散确认"]
         if top_20pct_days is None:
@@ -273,7 +317,7 @@ def filter_core_stocks(trade_date: str, sector_codes: list[str] = None) -> dict:
         relative_condition = relative_strength is True
         technical_condition = technical.get("above_ma_stack_or_20d_high") is True
 
-        leader_effect, leader_note = _leader_effect_approximation(ts_code, sector_code, hist, sector_members)
+        leader_effect, leader_note, leader_effect_evidence = _leader_effect_approximation(ts_code, sector_code, hist, sector_members)
         if leader_effect is None:
             manual_checks.append(f"带动性: {leader_note}")
         elif leader_effect is False:
@@ -306,6 +350,8 @@ def filter_core_stocks(trade_date: str, sector_codes: list[str] = None) -> dict:
             "turnover_rate": round(turnover_rate, 2) if turnover_rate is not None else None,
             "circ_mv": circ_mv,
             "top_20pct_days": top_20pct_days,
+            "relative_strength_evidence": relative_strength_evidence,
+            "leader_effect_evidence": leader_effect_evidence,
             "conditions": conditions,
             "condition_count": condition_count,
             "missing_conditions": [key for key, passed in conditions.items() if not passed],

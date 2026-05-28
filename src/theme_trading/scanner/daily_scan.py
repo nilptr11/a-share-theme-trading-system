@@ -58,6 +58,7 @@ def daily_scan(
         report["human_judgment"].append("主线仅处于观察状态，仅允许买点一试错预案")
 
     active_themes = confirmed_themes if confirmed_themes else watch_themes
+    requested_sector_codes = set(sector_codes) if sector_codes is not None else None
     if sector_codes is None:
         sector_codes = [theme["ts_code"] for theme in active_themes[:3]]
 
@@ -69,6 +70,18 @@ def daily_scan(
     confirmed_core_stocks = stocks.get("confirmed_core_stocks", [])
     watch_core = stocks.get("watch_core_stocks", [])
     core_universe = confirmed_core_stocks[:10] if confirmed_core_stocks else watch_core[:5]
+
+    watch_shape_themes = watch_themes
+    if requested_sector_codes is not None:
+        watch_shape_themes = [theme for theme in watch_themes if theme["ts_code"] in requested_sector_codes]
+    should_scan_watch_shapes = include_buy_points and bool(confirmed_themes) and bool(watch_shape_themes)
+    if should_scan_watch_shapes:
+        _scan_watch_theme_buy_shapes(
+            report,
+            watch_shape_themes,
+            trade_date=trade_date,
+            score=score,
+        )
 
     if not core_universe:
         if watch_core:
@@ -137,6 +150,75 @@ def _score_for_stock(score: dict, sector_context: dict | None) -> dict:
     return score
 
 
+def _scan_watch_theme_buy_shapes(
+    report: dict,
+    watch_themes: list[dict],
+    *,
+    trade_date: str,
+    score: dict,
+) -> None:
+    observable_statuses = {"pending_next_day_strength", "pending_next_open", "watch", "executable_plan"}
+    seen: set[tuple[str, str]] = set()
+    scan_cache: dict[tuple[str, str], dict] = {}
+
+    for theme in watch_themes[:3]:
+        stocks = filter_core_stocks(trade_date, [theme["ts_code"]])
+        candidates = (stocks.get("confirmed_core_stocks", []) + stocks.get("watch_core_stocks", []))[:5]
+        for stock in candidates:
+            cache_key = (theme["ts_code"], stock["ts_code"])
+            if cache_key in scan_cache:
+                bp = scan_cache[cache_key]
+            else:
+                stock_score = _score_for_stock(score, theme)
+                bp = scan_buy_points(
+                    stock["ts_code"],
+                    trade_date,
+                    market_context=stock_score,
+                    sector_context=theme,
+                    core_context=stock,
+                )
+                scan_cache[cache_key] = bp
+            if not bp.get("ok", True):
+                continue
+            observable = [
+                (name, info)
+                for name, info in bp.get("buy_points", {}).items()
+                if info.get("status") in observable_statuses
+            ]
+            if not observable:
+                continue
+            selected, info = sorted(observable, key=lambda item: item[1].get("priority", 99))[0]
+            key = (stock["ts_code"], selected)
+            if key in seen:
+                continue
+            seen.add(key)
+            report["watch_buy_shapes"].append({
+                "category": "watch_theme_buy_shape",
+                "theme_code": theme["ts_code"],
+                "theme_name": theme.get("name"),
+                "theme_condition_count": theme.get("condition_count"),
+                "theme_missing_conditions": theme.get("missing_conditions", []),
+                "ts_code": stock["ts_code"],
+                "name": stock.get("name"),
+                "buy_point": selected,
+                "status": info.get("status"),
+                "confirm_date": info.get("confirm_date", bp.get("confirm_date")),
+                "execution_date": info.get("execution_date", bp.get("execution_date")),
+                "stop_loss": info.get("stop_loss"),
+                "execution_check": info.get("execution_check"),
+                "failure_signals": info.get("failure_signals", []),
+                "setup_triggered": info.get("setup_triggered"),
+                "triggered": info.get("triggered"),
+                "strength_score": info.get("strength_score"),
+                "strength_level": info.get("strength_level"),
+                "strength_reasons": info.get("strength_reasons", []),
+                "theme_human_judgment": stocks.get("human_judgment", []),
+                "theme_data_warnings": stocks.get("data_warnings", []),
+                "reason": "观察主线尚未确认，仅提示即将确认/观察买点形态，不生成正式预案",
+                "actionable": False,
+            })
+
+
 def _scan_current_buy_points(
     report: dict,
     core_universe: list[dict],
@@ -166,7 +248,30 @@ def _scan_current_buy_points(
 
         selected = bp.get("selected_buy_point")
         if not selected:
-            report["observation_pool"].append({"category": "core_no_buy_point", **stock})
+            invalid_setups = [
+                {"buy_point": name, **info}
+                for name, info in bp.get("buy_points", {}).items()
+                if info.get("setup_triggered") and info.get("status") == "invalid"
+            ]
+            if invalid_setups:
+                for item in invalid_setups:
+                    report["observation_pool"].append({
+                        "category": "invalid_buy_setup",
+                        "ts_code": stock["ts_code"],
+                        "name": stock.get("name"),
+                        "buy_point": item["buy_point"],
+                        "status": item.get("status"),
+                        "stop_loss": item.get("stop_loss"),
+                        "execution_check": item.get("execution_check"),
+                        "failure_signals": item.get("failure_signals", []),
+                        "manual_checks": item.get("manual_checks", []),
+                        "strength_score": item.get("strength_score"),
+                        "strength_level": item.get("strength_level"),
+                        "strength_reasons": item.get("strength_reasons", []),
+                        "reason": "买点形态出现但执行条件已失效，不生成预案",
+                    })
+            else:
+                report["observation_pool"].append({"category": "core_no_buy_point", **stock})
             continue
 
         if trial_mode and selected != "买点一_放量突破":
