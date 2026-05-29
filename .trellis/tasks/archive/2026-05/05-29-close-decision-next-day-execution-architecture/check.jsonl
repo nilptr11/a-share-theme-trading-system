@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/05-29-close-decision-next-day-execution-architecture/prd.md","reason":"Verification must check every acceptance criterion and out-of-scope boundary from the approved PRD."}
+{"file":".trellis/tasks/05-29-close-decision-next-day-execution-architecture/research/current-architecture.md","reason":"Quality review should verify the implementation resolves the identified mixed date/status boundaries and does not regress current behavior unintentionally."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check must validate data contract consistency across CLI, scanner, renderer, JSON files, and tests."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check should look for unnecessary duplication in serialization, status mapping, and execution confirmation logic."}

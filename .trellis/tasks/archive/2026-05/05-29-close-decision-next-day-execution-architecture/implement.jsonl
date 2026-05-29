@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/05-29-close-decision-next-day-execution-architecture/prd.md","reason":"Primary requirements, scope, acceptance criteria, and implementation plan for the close-decision/next-day execution architecture refactor."}
+{"file":".trellis/tasks/05-29-close-decision-next-day-execution-architecture/research/current-architecture.md","reason":"Research on current scanner data flow, date/status semantics, mixed boundaries, and recommended architecture options."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"This refactor changes data flow across CLI, scanner, routing, rendering, JSON artifacts, and tests."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Implementation should reuse existing signal/routing/execution-check concepts where appropriate while avoiding duplicated plan/confirmation serialization logic."}
