@@ -72,6 +72,8 @@ class BuyPointScanResult(TypedDict, total=False):
     confirm_date: str | None
     execution_date: str | None
     close: float
+    phase: str
+    allow_execution_check: bool
     buy_points: dict[str, BuyPointInfo]
     selected_buy_point: str | None
     suppressed_by_priority: list[str]
@@ -103,6 +105,7 @@ class TradeSignal(TypedDict, total=False):
     setup_date: str | None
     confirm_date: str | None
     execution_date: str | None
+    planned_execution_date: str | None
     close: float | None
     stop_loss: float | None
     execution_check: JsonDict | None
@@ -120,8 +123,50 @@ class TradeSignal(TypedDict, total=False):
     reason: str
 
 
+class DecisionPlan(TypedDict, total=False):
+    schema_version: int
+    phase: str
+    decision_date: str
+    latest_complete_trade_date: str
+    planned_execution_date: str | None
+    created_at: str
+    report: JsonDict
+    plans: list[JsonDict]
+
+
+class ExecutionConfirmation(TypedDict, total=False):
+    schema_version: int
+    phase: str
+    plan_path: str
+    decision_date: str | None
+    latest_complete_trade_date: str | None
+    execution_date: str | None
+    created_at: str
+    results: list[JsonDict]
+    summary: JsonDict
+
+
+class NoPlanDiagnostics(TypedDict, total=False):
+    has_plan: bool
+    market_gate: str | None
+    confirmed_theme_count: int
+    watch_theme_count: int
+    confirmed_core_count: int
+    watch_core_count: int
+    scan_failure_count: int
+    invalid_setup_count: int
+    no_buy_point_count: int
+    pending_confirmation_count: int
+    risk_notes_count: int
+    reason_codes: list[str]
+    main_reasons: list[str]
+
+
 class DailyScanReport(TypedDict, total=False):
     trade_date: str
+    decision_date: str
+    latest_complete_trade_date: str
+    phase: str
     market_score: MarketScoreResult | None
     market_gate: str | None
     themes: JsonDict | None
@@ -130,11 +175,12 @@ class DailyScanReport(TypedDict, total=False):
     observation_pool: list[JsonDict]
     pending_confirmations: list[JsonDict]
     watch_buy_shapes: list[JsonDict]
-    executable_plans: list[TradeSignal]
+    pending_open_plans: list[TradeSignal]
     trial_plans: list[TradeSignal]
     pending_reviews: list[JsonDict]
     pre_trade_checks: list[JsonDict]
     blocked_reasons: list[str]
     data_warnings: list[str]
     human_judgment: list[str]
+    no_plan_diagnostics: NoPlanDiagnostics
     risk_notes: NotRequired[list[str]]

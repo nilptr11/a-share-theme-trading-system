@@ -85,5 +85,5 @@ def review_pending_setups(
             signal,
             market_closed=market_closed,
             trial_mode=signal["plan_type"] == "trial",
-            blocked_message=f"{ts_code} {buy_point_name} pending 回看状态 {signal.get('status')}，不生成预案",
+            blocked_message=f"{ts_code} {buy_point_name} pending 回看状态 {signal.get('status')}，不生成人工执行预案",
         )

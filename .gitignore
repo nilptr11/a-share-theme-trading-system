@@ -9,3 +9,12 @@ venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# AI
+.claude/
+.trellis/
+AGENTS.md
+
+# daily-scan runtime artifacts
+/plans/
+/confirmations/

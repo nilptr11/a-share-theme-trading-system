@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from theme_trading.data.market_data import fetch_daily
+from theme_trading.data.market_data import fetch_daily, fetch_trade_cal
 
 from .buy_point_rules import (
     consecutive_drops,
@@ -34,16 +34,48 @@ _status_for_setup = status_for_setup
 _rate_buy_point_strength = rate_buy_point_strength
 
 
+def _next_trade_date(trade_date: str) -> str | None:
+    end = _n_days_after(trade_date, 14)
+    try:
+        cal = fetch_trade_cal(start_date=trade_date, end_date=end)
+    except Exception:
+        cal = None
+    if cal is not None and len(cal) > 0 and "is_open" in cal.columns:
+        open_days = cal[cal["is_open"].astype(str) == "1"].sort_values("cal_date")
+        future = open_days[open_days["cal_date"].astype(str) > trade_date]
+        if len(future) > 0:
+            return str(future.iloc[0]["cal_date"])
+    candidate = _n_days_after(trade_date, 1)
+    while np.datetime64(candidate[:4] + "-" + candidate[4:6] + "-" + candidate[6:]).astype(object).weekday() >= 5:
+        candidate = _n_days_after(candidate, 1)
+    return candidate
+
+
+def _derive_future_rows(df, today: int, allow_future_rows: bool) -> tuple[object | None, object | None]:
+    if not allow_future_rows:
+        return None, None
+    next_row = df.iloc[today + 1] if today + 1 < len(df) else None
+    next_next_row = df.iloc[today + 2] if today + 2 < len(df) else None
+    return next_row, next_next_row
+
+
 def scan_buy_points(
     ts_code: str,
     trade_date: str,
     market_context: dict | None = None,
     sector_context: dict | None = None,
     core_context: dict | None = None,
+    allow_execution_check: bool = False,
+    as_of_date: str | None = None,
 ) -> dict:
-    """对单只个股扫描四个买点条件。"""
+    """对单只个股扫描四个买点条件。
+
+    默认按收盘决策阶段运行：只读取 as_of_date 及以前的完整收盘数据，
+    避免历史回放时用决策日之后的数据提前确认转强或开盘执行。
+    """
+    as_of_date = as_of_date or trade_date
     start = _n_days_ago(trade_date, 90)
-    end = _n_days_after(trade_date, 10)
+    end = _n_days_after(trade_date, 10) if allow_execution_check else as_of_date
     df = fetch_daily(ts_code=ts_code, start_date=start, end_date=end)
     if df is None or len(df) < 25:
         return {"ok": False, "error": "数据不足"}
@@ -57,8 +89,9 @@ def scan_buy_points(
     if today < 24:
         return {"ok": False, "error": "确认日前历史数据不足"}
 
-    next_row = df.iloc[today + 1] if today + 1 < len(df) else None
-    next_next_row = df.iloc[today + 2] if today + 2 < len(df) else None
+    next_row, next_next_row = _derive_future_rows(df, today, allow_execution_check or as_of_date > trade_date)
+    planned_next_date = next_row["trade_date"] if next_row is not None else _next_trade_date(trade_date)
+    planned_next_next_date = next_next_row["trade_date"] if next_next_row is not None and planned_next_date is not None else (_next_trade_date(str(planned_next_date)) if planned_next_date is not None else None)
     hist = df.iloc[:today + 1].copy()
     closes = hist["close"].astype(float).values
     highs = hist["high"].astype(float).values
@@ -87,6 +120,9 @@ def scan_buy_points(
         "confirm_date": None,
         "execution_date": None,
         "close": float(closes[idx]),
+        "phase": "close_decision" if not allow_execution_check else "execution_aware_scan",
+        "as_of_date": as_of_date,
+        "allow_execution_check": allow_execution_check,
         "ma5": float(ma5[idx]) if not np.isnan(ma5[idx]) else None,
         "ma10": float(ma10[idx]) if not np.isnan(ma10[idx]) else None,
         "ma20": float(ma20[idx]) if not np.isnan(ma20[idx]) else None,
@@ -118,6 +154,7 @@ def scan_buy_points(
         common_manual=common_manual,
         sector_pct=sector_pct,
         emotion_extreme=emotion_extreme,
+        allow_execution_check=allow_execution_check,
     )
     result["buy_points"]["买点二_主升回踩"] = evaluate_pullback_buy_point(
         closes=closes,
@@ -133,6 +170,7 @@ def scan_buy_points(
         next_next_row=next_next_row,
         common_manual=common_manual,
         sector_amount_ratio=sector_amount_ratio,
+        allow_execution_check=allow_execution_check,
     )
     result["buy_points"]["买点三_突破确认"] = evaluate_breakout_confirm_buy_point(
         hist=hist,
@@ -145,6 +183,7 @@ def scan_buy_points(
         next_next_row=next_next_row,
         common_manual=common_manual,
         sector_pct=sector_pct,
+        allow_execution_check=allow_execution_check,
     )
     result["buy_points"]["买点四_趋势均线"] = evaluate_trend_ma_buy_point(
         closes=closes,
@@ -160,13 +199,14 @@ def scan_buy_points(
         next_row=next_row,
         next_next_row=next_next_row,
         common_manual=common_manual,
+        allow_execution_check=allow_execution_check,
     )
 
     for name, info in result["buy_points"].items():
         info.update(_rate_buy_point_strength(name, info))
         needs_strength = name != "买点一_放量突破"
-        info["confirm_date"] = next_row["trade_date"] if needs_strength and next_row is not None else trade_date
-        info["execution_date"] = next_next_row["trade_date"] if needs_strength and next_next_row is not None else (next_row["trade_date"] if next_row is not None else None)
+        info["confirm_date"] = planned_next_date if needs_strength else trade_date
+        info["execution_date"] = planned_next_next_date if needs_strength else planned_next_date
 
     selected, suppressed = _select_highest_priority_buy_point(result["buy_points"])
     result["selected_buy_point"] = selected
@@ -177,11 +217,11 @@ def scan_buy_points(
 
     needs_strength = selected is not None and selected != "买点一_放量突破"
     if needs_strength:
-        result["confirm_date"] = next_row["trade_date"] if next_row is not None else None
-        result["execution_date"] = next_next_row["trade_date"] if next_next_row is not None else None
+        result["confirm_date"] = planned_next_date
+        result["execution_date"] = planned_next_next_date
     else:
         result["confirm_date"] = trade_date
-        result["execution_date"] = next_row["trade_date"] if next_row is not None else None
+        result["execution_date"] = planned_next_date
 
     return result
 
@@ -202,6 +242,7 @@ def confirm_pending_buy_point(
         market_context=market_context,
         sector_context=sector_context,
         core_context=core_context,
+        as_of_date=confirm_date,
     )
     if not bp.get("ok", True):
         return {

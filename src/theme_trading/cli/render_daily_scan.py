@@ -97,7 +97,7 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
                 lines.append(f"    证据: {evidence}")
         lines.append("")
 
-    pending = report.get("pending_confirmations", [])
+    pending = [item for item in report.get("pending_confirmations", []) if item.get("category") != "buy_point_scan_failure"]
     if pending:
         lines.append(f"待确认 ({len(pending)} 项):")
         for item in pending[:12]:
@@ -106,7 +106,7 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
                 strength_text = f"  {strength}" if strength else ""
                 lines.append(f"  {item['ts_code']} {item['buy_point']}  状态 {item['status']}  止损参考 {item.get('stop_loss')}{strength_text}")
                 for check in item.get("manual_checks", [])[:2]:
-                    lines.append(f"    ? {check}")
+                    lines.append(f"    - {check}")
             else:
                 lines.append(f"  {item.get('ts_code', '-')}: {item.get('reason', item)}")
         lines.append("")
@@ -114,8 +114,9 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
     _append_watch_buy_shapes(lines, report.get("watch_buy_shapes", []))
     _append_invalid_buy_setups(lines, report.get("observation_pool", []))
 
-    _append_plans(lines, "可执行预案", report.get("executable_plans", []))
-    _append_plans(lines, "试错预案", report.get("trial_plans", []), suffix=" — 主线未确认，仅买点一")
+    _append_plans(lines, "待开盘确认预案", report.get("pending_open_plans", []))
+    _append_plans(lines, "待开盘确认试错预案", report.get("trial_plans", []), suffix=" — 主线未确认，仅买点一")
+    _append_no_plan_diagnostics(lines, report)
 
     pre_trade = report.get("pre_trade_checks", [])
     if pre_trade:
@@ -129,7 +130,7 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
                 lines.append(f"    为什么是现在: {questions['why_now']}")
                 lines.append(f"    错了在哪里走: {questions['where_exit']}")
             for reason in check.get("block_reasons", []):
-                lines.append(f"    ✗ {reason}")
+                lines.append(f"    - {reason}")
         lines.append("")
 
     blocked = report.get("blocked_reasons", [])
@@ -143,7 +144,7 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
     if warnings:
         lines.append("数据提示:")
         for warning in dict.fromkeys(warnings):
-            lines.append(f"  ? {warning}")
+            lines.append(f"  - {warning}")
         lines.append("")
 
     human = report.get("human_judgment", [])
@@ -151,20 +152,63 @@ def render_daily_scan_report(report: dict, elapsed_seconds: float | None = None)
         lines.append("─" * 60)
         lines.append("需人工确认:")
         for h in human:
-            lines.append(f"  ? {h}")
+            lines.append(f"  - {h}")
 
     risk_notes = report.get("risk_notes", [])
     if risk_notes:
         lines.append("")
         lines.append("风险提示:")
         for note in risk_notes:
-            lines.append(f"  ⚠ {note}")
+            lines.append(f"  - {note}")
 
     if elapsed_seconds is not None:
         lines.append("")
         lines.append(f"总耗时: {elapsed_seconds:.0f}s")
 
     return "\n".join(lines)
+
+
+def _append_no_plan_diagnostics(lines: list[str], report: dict) -> None:
+    if report.get("pending_open_plans") or report.get("trial_plans"):
+        return
+
+    diagnostics = report.get("no_plan_diagnostics") or _derive_no_plan_diagnostics(report)
+    lines.append("无人工执行预案诊断:")
+    lines.append(
+        "  "
+        f"市场开关: {diagnostics.get('market_gate') or '-'}；"
+        f"确认主线: {diagnostics.get('confirmed_theme_count', 0)}；"
+        f"确认核心股: {diagnostics.get('confirmed_core_count', 0)}；"
+        f"买点扫描失败: {diagnostics.get('scan_failure_count', 0)}；"
+        f"已失效买点: {diagnostics.get('invalid_setup_count', 0)}；"
+        f"待确认项: {diagnostics.get('pending_confirmation_count', 0)}；"
+        f"风险提示: {diagnostics.get('risk_notes_count', 0)}"
+    )
+    reasons = diagnostics.get("main_reasons") or ["没有符合规则的待开盘人工执行确认预案"]
+    for reason in reasons[:8]:
+        lines.append(f"  - {reason}")
+    scan_failures = [item for item in report.get("pending_confirmations", []) if item.get("category") == "buy_point_scan_failure"]
+    for item in scan_failures[:5]:
+        lines.append(f"    扫描失败: {item.get('ts_code', '-')} {item.get('name') or ''} — {item.get('reason', '买点扫描失败')}")
+    lines.append("")
+
+
+def _derive_no_plan_diagnostics(report: dict) -> dict:
+    themes = report.get("themes") or {}
+    stocks = report.get("core_stocks") or {}
+    pending = report.get("pending_confirmations") or []
+    observation_pool = report.get("observation_pool") or []
+    scan_failure_count = len([item for item in pending if item.get("category") == "buy_point_scan_failure"])
+    return {
+        "market_gate": report.get("market_gate") or (report.get("market_score") or {}).get("trade_permission"),
+        "confirmed_theme_count": len(themes.get("confirmed_themes", []) or []),
+        "confirmed_core_count": len(stocks.get("confirmed_core_stocks", []) or []),
+        "scan_failure_count": scan_failure_count,
+        "invalid_setup_count": len([item for item in observation_pool if item.get("category") == "invalid_buy_setup"]),
+        "pending_confirmation_count": len([item for item in pending if item.get("category") != "buy_point_scan_failure"]),
+        "risk_notes_count": len(report.get("risk_notes", []) or []),
+        "main_reasons": [],
+    }
 
 
 def _append_watch_buy_shapes(lines: list[str], items: list[dict]) -> None:
@@ -191,7 +235,7 @@ def _append_invalid_buy_setups(lines: list[str], observation_pool: list[dict]) -
     items = [item for item in observation_pool if item.get("category") == "invalid_buy_setup"]
     if not items:
         return
-    lines.append(f"已失效买点形态 ({len(items)} 项，仅诊断，不生成预案):")
+    lines.append(f"已失效买点形态 ({len(items)} 项，仅诊断，不生成人工执行预案):")
     for item in items[:12]:
         strength = _format_strength(item)
         execution = item.get("execution_check") or {}
@@ -215,18 +259,46 @@ def _append_invalid_buy_setups(lines: list[str], observation_pool: list[dict]) -
     lines.append("")
 
 
+def render_execution_confirmation(confirmation: dict) -> str:
+    lines = [
+        "开盘执行确认结果",
+        f"计划文件: {confirmation.get('plan_path')}",
+        f"决策日: {confirmation.get('decision_date') or '-'}  执行确认日: {confirmation.get('execution_date') or '-'}",
+    ]
+    summary = confirmation.get("summary", {})
+    lines.append(
+        f"汇总: 共 {summary.get('total', 0)} 项，通过 {summary.get('executable', 0)} 项，"
+        f"跳过 {summary.get('skipped', 0)} 项，失效 {summary.get('invalid', 0)} 项"
+    )
+    lines.append("")
+    for item in confirmation.get("results", []):
+        status = item.get("status")
+        status_text = "已通过确认，可人工执行" if status == "executable_plan" else status
+        gap = (item.get("execution_check") or {}).get("gap_check") or {}
+        gap_pct = gap.get("gap_pct")
+        gap_text = f"，开盘偏离 {gap_pct:+.1%}" if gap_pct is not None else ""
+        lines.append(
+            f"  {item.get('ts_code')} {item.get('buy_point')}  状态 {status_text}  "
+            f"开盘 {item.get('open')}{gap_text}"
+        )
+        lines.append(f"    原因: {item.get('reason')}")
+    return "\n".join(lines)
+
+
 def _append_plans(lines: list[str], title: str, plans: list[dict], suffix: str = "") -> None:
     if not plans:
         return
     lines.append(f"{title} ({len(plans)} 只){suffix}:")
     for item in plans:
         execution = item.get("execution_check", {})
-        dates = f"信号日 {item.get('setup_date') or '-'}  →  确认日 {item.get('confirm_date') or '-'}  →  计划买入日 {item.get('execution_date') or '-'}"
-        lines.append(f"  {item['ts_code']}  {item['buy_point']}  状态 {item['status']}")
+        planned_execution_date = item.get("planned_execution_date") or item.get("execution_date")
+        dates = f"信号日 {item.get('setup_date') or '-'}  →  确认日 {item.get('confirm_date') or '-'}  →  计划确认日 {planned_execution_date or '-'}"
+        status_text = "待人工执行确认" if item.get("status") == "pending_next_open" else item.get("status")
+        lines.append(f"  {item['ts_code']}  {item['buy_point']}  状态 {status_text}")
         lines.append(f"    {dates}")
         lines.append(
             f"    确认收盘 {item.get('close')}  止损参考 {item.get('stop_loss')}  "
-            f"执行条件: {execution.get('rule', '次日开盘 ±3% 内')}"
+            f"人工执行确认条件: {execution.get('rule', '次日开盘 ±3% 内')}"
         )
         strength = _format_strength(item)
         if strength:

@@ -6,6 +6,9 @@ from .types import DailyScanReport
 def new_daily_report(trade_date: str) -> DailyScanReport:
     return {
         "trade_date": trade_date,
+        "decision_date": trade_date,
+        "latest_complete_trade_date": trade_date,
+        "phase": "close_decision",
         "market_score": None,
         "market_gate": None,
         "themes": None,
@@ -14,13 +17,32 @@ def new_daily_report(trade_date: str) -> DailyScanReport:
         "observation_pool": [],
         "pending_confirmations": [],
         "watch_buy_shapes": [],
-        "executable_plans": [],
+        "pending_open_plans": [],
         "trial_plans": [],
         "pending_reviews": [],
         "pre_trade_checks": [],
         "blocked_reasons": [],
         "data_warnings": [],
         "human_judgment": [],
+        "no_plan_diagnostics": _empty_no_plan_diagnostics(),
+    }
+
+
+def _empty_no_plan_diagnostics() -> dict:
+    return {
+        "has_plan": False,
+        "market_gate": None,
+        "confirmed_theme_count": 0,
+        "watch_theme_count": 0,
+        "confirmed_core_count": 0,
+        "watch_core_count": 0,
+        "scan_failure_count": 0,
+        "invalid_setup_count": 0,
+        "no_buy_point_count": 0,
+        "pending_confirmation_count": 0,
+        "risk_notes_count": 0,
+        "reason_codes": [],
+        "main_reasons": [],
     }
 
 

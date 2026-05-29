@@ -40,7 +40,7 @@ def route_signal(
         if trial_mode:
             report["trial_plans"].append(signal)
         else:
-            report["executable_plans"].append(signal)
+            report["pending_open_plans"].append(signal)
         report["pre_trade_checks"].append(checklist)
     elif route == "pending":
         report["pending_confirmations"].append(signal)

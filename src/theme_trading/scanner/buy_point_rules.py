@@ -131,7 +131,7 @@ def execution_check(confirm_close: float, next_row) -> dict:
         "next_open": round(next_open, 2) if next_open is not None else None,
         "gap_limit_pct": NEXT_OPEN_GAP_LIMIT,
         "gap_check": gap,
-        "rule": "次日开盘价相对确认日收盘价在 ±3% 内才可执行",
+        "rule": "次日开盘价相对确认日收盘价在 ±3% 内才可进入人工执行确认窗口",
     }
 
 
@@ -143,8 +143,17 @@ def next_strength_ok(next_row, base_amount: float) -> bool | None:
     return bool(float(next_row["close"]) > float(next_row["open"]) and float(next_row["amount"]) >= base_amount * REBOUND_AMOUNT_RATIO)
 
 
-def status_for_setup(setup: bool, next_row, confirm_close: float, needs_strength: bool, strength_ok: bool | None, blocked: bool = False) -> tuple[bool, str, dict]:
-    execution = execution_check(confirm_close, next_row)
+def status_for_setup(
+    setup: bool,
+    next_row,
+    confirm_close: float,
+    needs_strength: bool,
+    strength_ok: bool | None,
+    blocked: bool = False,
+    allow_execution_check: bool = False,
+) -> tuple[bool, str, dict]:
+    execution_row = next_row if allow_execution_check else None
+    execution = execution_check(confirm_close, execution_row)
     gap = execution["gap_check"]
     if not setup:
         return False, "not_triggered", execution
@@ -260,6 +269,7 @@ def evaluate_breakout_buy_point(
     common_manual: list[str],
     sector_pct: float | None,
     emotion_extreme: bool,
+    allow_execution_check: bool = False,
 ) -> dict:
     bp = empty_point(BUY_POINT_PRIORITY["买点一_放量突破"], common_manual.copy())
     recent_5_low = float(np.min(lows[-6:-1]))
@@ -275,7 +285,15 @@ def evaluate_breakout_buy_point(
 
     setup = is_consolidating and is_breakout and amount_ok and close_confirm and sector_follow
     stop_loss = recent_5_low * STOP_LOSS_RATIO if recent_5_low < high_20 else high_20 * STOP_LOSS_RATIO
-    triggered, status, execution = status_for_setup(setup, next_row, closes[idx], False, None, blocked=emotion_extreme)
+    triggered, status, execution = status_for_setup(
+        setup,
+        next_row,
+        closes[idx],
+        False,
+        None,
+        blocked=emotion_extreme,
+        allow_execution_check=allow_execution_check,
+    )
     if emotion_extreme and setup:
         bp["manual_checks"].append("情绪极端日不追涨，买点一仅列观察")
     bp.update({
@@ -323,6 +341,7 @@ def evaluate_pullback_buy_point(
     next_next_row,
     common_manual: list[str],
     sector_amount_ratio: float | None,
+    allow_execution_check: bool = False,
 ) -> dict:
     bp = empty_point(BUY_POINT_PRIORITY["买点二_主升回踩"], common_manual.copy())
     above_ma5_3d = all(closes[i] > ma5[i] for i in range(max(idx - 2, 0), idx + 1) if not np.isnan(ma5[i]))
@@ -343,7 +362,14 @@ def evaluate_pullback_buy_point(
         setup = False
     strength_ok = next_strength_ok(next_row, amounts[idx])
     confirm_close = float(next_row["close"]) if next_row is not None else closes[idx]
-    triggered, status, execution = status_for_setup(setup, next_next_row, confirm_close, True, strength_ok)
+    triggered, status, execution = status_for_setup(
+        setup,
+        next_next_row,
+        confirm_close,
+        True,
+        strength_ok,
+        allow_execution_check=allow_execution_check,
+    )
     ma5_stop = ma5[idx] * STOP_LOSS_RATIO if not np.isnan(ma5[idx]) else None
     low_stop = lows[idx] * STOP_LOSS_RATIO
     stop_loss = ma5_stop if ma5_stop is not None and ma5[idx] >= lows[idx] and (ma5[idx] - lows[idx]) / lows[idx] <= 0.02 else low_stop
@@ -388,6 +414,7 @@ def evaluate_breakout_confirm_buy_point(
     next_next_row,
     common_manual: list[str],
     sector_pct: float | None,
+    allow_execution_check: bool = False,
 ) -> dict:
     bp = empty_point(BUY_POINT_PRIORITY["买点三_突破确认"], common_manual.copy())
     high_60_window = highs[-61:-1] if len(highs) >= 61 else highs[:-1]
@@ -404,7 +431,14 @@ def evaluate_breakout_confirm_buy_point(
     setup = recent_high_60 and amount_shrink and above_breakout and sector_not_weak
     strength_ok = next_strength_ok(next_row, amounts[idx])
     confirm_close = float(next_row["close"]) if next_row is not None else closes[idx]
-    triggered, status, execution = status_for_setup(setup, next_next_row, confirm_close, True, strength_ok)
+    triggered, status, execution = status_for_setup(
+        setup,
+        next_next_row,
+        confirm_close,
+        True,
+        strength_ok,
+        allow_execution_check=allow_execution_check,
+    )
     pullback_low = float(lows[idx])
     stop_loss = pullback_low * STOP_LOSS_RATIO if pullback_low > high_60 * 1.03 else high_60 * STOP_LOSS_RATIO
     bp.update({
@@ -450,6 +484,7 @@ def evaluate_trend_ma_buy_point(
     next_row,
     next_next_row,
     common_manual: list[str],
+    allow_execution_check: bool = False,
 ) -> dict:
     bp = empty_point(BUY_POINT_PRIORITY["买点四_趋势均线"], common_manual.copy())
     gain_20d = (closes[idx] - closes[-20]) / closes[-20] if len(closes) >= 20 else 0
@@ -486,7 +521,14 @@ def evaluate_trend_ma_buy_point(
             setup = False
     strength_ok = next_strength_ok(next_row, amounts[idx])
     confirm_close = float(next_row["close"]) if next_row is not None else closes[idx]
-    triggered, status, execution = status_for_setup(setup, next_next_row, confirm_close, True, strength_ok)
+    triggered, status, execution = status_for_setup(
+        setup,
+        next_next_row,
+        confirm_close,
+        True,
+        strength_ok,
+        allow_execution_check=allow_execution_check,
+    )
     if selected:
         ma_stop = selected["trend_ma_val"] * STOP_LOSS_RATIO
         low_stop = lows[idx] * STOP_LOSS_RATIO

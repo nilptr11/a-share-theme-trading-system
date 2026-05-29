@@ -31,7 +31,7 @@ def daily_scan(
 
     market_closed = score.get("trade_permission") == "closed"
     if market_closed:
-        report["human_judgment"].append("市场开关关闭，后续只生成观察池，不生成可执行预案")
+        report["human_judgment"].append("市场开关关闭，后续只生成观察池，不生成人工执行预案")
 
     breadth_extreme = score.get("emotion_extreme", False)
 
@@ -52,7 +52,7 @@ def daily_scan(
     trial_mode = not confirmed_themes and bool(watch_themes)
     if not confirmed_themes and not trial_mode:
         report["blocked_reasons"].append("无确认主线且无观察主线，不生成核心股买点扫描")
-        return report
+        return _finalize_no_plan_diagnostics(report)
 
     if trial_mode and watch_themes:
         report["human_judgment"].append("主线仅处于观察状态，仅允许买点一试错预案")
@@ -88,12 +88,12 @@ def daily_scan(
             report["blocked_reasons"].append("无确认核心强势股，仅保留观察核心股，不生成买点扫描")
         else:
             report["blocked_reasons"].append("无确认核心强势股，不生成买点扫描")
-        return report
+        return _finalize_no_plan_diagnostics(report)
 
     if not include_buy_points:
         report["human_judgment"].append("已跳过买点扫描")
         append_observation(report, "confirmed_core_stock", confirmed_core_stocks[:20])
-        return report
+        return _finalize_no_plan_diagnostics(report)
 
     theme_by_code = {theme["ts_code"]: theme for theme in active_themes}
     stock_by_code = {stock["ts_code"]: stock for stock in core_universe}
@@ -121,6 +121,84 @@ def daily_scan(
     if not report["buy_scans"]:
         report["human_judgment"].append("核心股中无买点 setup 触发")
 
+    return _finalize_no_plan_diagnostics(report)
+
+
+def _finalize_no_plan_diagnostics(report: dict) -> dict:
+    themes = report.get("themes") or {}
+    stocks = report.get("core_stocks") or {}
+    observation_pool = report.get("observation_pool") or []
+    pending_confirmations = report.get("pending_confirmations") or []
+    pending_open_plans = report.get("pending_open_plans") or []
+    trial_plans = report.get("trial_plans") or []
+
+    confirmed_theme_count = len(themes.get("confirmed_themes", []) or [])
+    watch_theme_count = len(themes.get("watch_themes", []) or [])
+    confirmed_core_count = len(stocks.get("confirmed_core_stocks", []) or [])
+    watch_core_count = len(stocks.get("watch_core_stocks", []) or [])
+    scan_failure_count = len([item for item in pending_confirmations if item.get("category") == "buy_point_scan_failure"])
+    invalid_setup_count = len([item for item in observation_pool if item.get("category") == "invalid_buy_setup"])
+    no_buy_point_count = len([item for item in observation_pool if item.get("category") == "core_no_buy_point"])
+    pending_confirmation_count = len([item for item in pending_confirmations if item.get("category") != "buy_point_scan_failure"])
+    risk_notes_count = len(report.get("risk_notes", []) or [])
+    has_plan = bool(pending_open_plans or trial_plans)
+
+    reason_codes: list[str] = []
+    main_reasons: list[str] = []
+
+    def add_reason(code: str, text: str) -> None:
+        if code not in reason_codes:
+            reason_codes.append(code)
+            main_reasons.append(text)
+
+    market_gate = report.get("market_gate")
+    if market_gate == "closed":
+        add_reason("market_closed", "市场开关关闭，收盘决策只保留观察，不生成人工执行预案")
+    elif market_gate == "restricted":
+        add_reason("market_restricted", "市场权限受限，需严格过滤买点与风险检查")
+
+    if confirmed_theme_count == 0:
+        if watch_theme_count == 0:
+            add_reason("no_theme", "无确认主线且无观察主线，未进入核心股买点扫描")
+        else:
+            add_reason("only_watch_theme", "主线未确认，仅允许买点一试错预案；未形成正式待开盘确认预案")
+
+    if confirmed_theme_count > 0 and confirmed_core_count == 0:
+        if watch_core_count > 0:
+            add_reason("no_confirmed_core", "无确认核心强势股，仅保留观察核心股，不生成正式买点预案")
+        else:
+            add_reason("no_core", "无确认核心强势股，未进入买点扫描")
+
+    if scan_failure_count:
+        add_reason("buy_point_scan_failed", f"{scan_failure_count} 只核心股买点扫描失败，常见原因是行情或历史窗口数据不足")
+    if invalid_setup_count:
+        add_reason("invalid_setup", f"{invalid_setup_count} 个买点形态已失效，未通过确认/执行条件")
+    if no_buy_point_count:
+        add_reason("no_buy_point", f"{no_buy_point_count} 只核心股未触发买点 setup")
+    if pending_confirmation_count:
+        add_reason("pending_confirmation", f"{pending_confirmation_count} 项仍待收盘转强/人工确认，不是待开盘执行预案")
+    if risk_notes_count:
+        add_reason("risk_notes", f"存在 {risk_notes_count} 条风险提示，需人工复核；风险提示不会放宽买点规则")
+    if report.get("pre_trade_checks") and not has_plan:
+        add_reason("pre_trade_blocked", "买入前检查未通过，信号进入观察或阻断，不生成预案")
+    if not has_plan and not reason_codes:
+        add_reason("no_eligible_plan", "市场、主线、核心股、买点与风险检查后没有符合规则的人工执行预案")
+
+    report["no_plan_diagnostics"] = {
+        "has_plan": has_plan,
+        "market_gate": market_gate,
+        "confirmed_theme_count": confirmed_theme_count,
+        "watch_theme_count": watch_theme_count,
+        "confirmed_core_count": confirmed_core_count,
+        "watch_core_count": watch_core_count,
+        "scan_failure_count": scan_failure_count,
+        "invalid_setup_count": invalid_setup_count,
+        "no_buy_point_count": no_buy_point_count,
+        "pending_confirmation_count": pending_confirmation_count,
+        "risk_notes_count": risk_notes_count,
+        "reason_codes": reason_codes,
+        "main_reasons": main_reasons,
+    }
     return report
 
 
@@ -157,7 +235,7 @@ def _scan_watch_theme_buy_shapes(
     trade_date: str,
     score: dict,
 ) -> None:
-    observable_statuses = {"pending_next_day_strength", "pending_next_open", "watch", "executable_plan"}
+    observable_statuses = {"pending_next_day_strength", "pending_next_open", "watch"}
     seen: set[tuple[str, str]] = set()
     scan_cache: dict[tuple[str, str], dict] = {}
 
@@ -241,7 +319,10 @@ def _scan_current_buy_points(
         )
         if not bp.get("ok", True):
             report["pending_confirmations"].append({
+                "category": "buy_point_scan_failure",
                 "ts_code": stock["ts_code"],
+                "name": stock.get("name"),
+                "sector_code": stock.get("sector_code"),
                 "reason": bp.get("error", "买点扫描失败"),
             })
             continue
@@ -268,7 +349,7 @@ def _scan_current_buy_points(
                         "strength_score": item.get("strength_score"),
                         "strength_level": item.get("strength_level"),
                         "strength_reasons": item.get("strength_reasons", []),
-                        "reason": "买点形态出现但执行条件已失效，不生成预案",
+                        "reason": "买点形态出现但执行条件已失效，不生成人工执行预案",
                     })
             else:
                 report["observation_pool"].append({"category": "core_no_buy_point", **stock})
@@ -300,6 +381,6 @@ def _scan_current_buy_points(
             signal,
             market_closed=market_closed,
             trial_mode=trial_mode,
-            blocked_message=f"{stock['ts_code']} {selected} 状态 {signal.get('status')}，不生成预案",
+            blocked_message=f"{stock['ts_code']} {selected} 状态 {signal.get('status')}，不生成人工执行预案",
             market_closed_message=f"{stock['ts_code']} {selected} 因市场开关关闭不列入预案",
         )

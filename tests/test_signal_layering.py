@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -10,8 +13,11 @@ from theme_trading.scanner.signals import build_signal_from_buy_scan
 from theme_trading.scanner.pre_trade import pre_trade_checklist
 from theme_trading.scanner.daily_scan import daily_scan
 from theme_trading.scanner.buy_point_rules import rate_buy_point_strength
+from theme_trading.scanner.buy_points import scan_buy_points
+from theme_trading.scanner.execution import build_execution_confirmation
+from theme_trading.scanner.plans import build_decision_plan, save_decision_plan
 from theme_trading.scanner.utils import _select_highest_priority_buy_point
-from theme_trading.cli.render_daily_scan import render_daily_scan_report
+from theme_trading.cli.render_daily_scan import render_daily_scan_report, render_execution_confirmation
 
 
 def _daily_df(closes, amounts=None):
@@ -30,6 +36,58 @@ def _daily_df(closes, amounts=None):
 
 
 class SignalLayeringTest(unittest.TestCase):
+    @patch("theme_trading.scanner.buy_points.fetch_daily")
+    def test_close_decision_scan_does_not_upgrade_to_executable_plan(self, fetch_daily):
+        closes = [10.0] * 24 + [10.0, 10.2, 11.0]
+        amounts = [1000] * 24 + [1800, 1000, 2000]
+        df = _daily_df(closes, amounts)
+        df.loc[18:23, "low"] = [9.98, 9.99, 10.0, 10.01, 10.02, 10.03]
+        df.loc[18:23, "high"] = [10.08, 10.09, 10.1, 10.11, 10.12, 10.13]
+        df.loc[18:23, "close"] = [10.03, 10.04, 10.05, 10.06, 10.07, 10.08]
+        df.loc[24, "open"] = 10.05
+        df.loc[24, "high"] = 10.4
+        df.loc[24, "low"] = 9.9
+        df.loc[24, "close"] = 10.35
+        df.loc[25, "open"] = 10.25
+        df.loc[25, "close"] = 11.0
+        df.loc[25, "high"] = 11.1
+        df.loc[26, "open"] = 11.1
+        fetch_daily.return_value = df
+
+        result = scan_buy_points("000001.SZ", "20260125", allow_execution_check=False)
+
+        info = result["buy_points"]["买点一_放量突破"]
+        self.assertTrue(info["setup_triggered"])
+        self.assertEqual(info["status"], "pending_next_open")
+        self.assertEqual(info["execution_check"]["gap_check"]["checked"], False)
+        self.assertEqual(result["phase"], "close_decision")
+
+    @patch("theme_trading.scanner.buy_points.fetch_trade_cal")
+    @patch("theme_trading.scanner.buy_points.fetch_daily")
+    def test_close_decision_scan_does_not_use_future_close_for_strength_confirmation(self, fetch_daily, fetch_trade_cal):
+        closes = [10.0] * 30
+        amounts = [1000] * 30
+        df = _daily_df(closes, amounts)
+        df.loc[24:26, "close"] = [11.0, 10.8, 11.2]
+        df.loc[24:26, "open"] = [10.9, 10.7, 10.9]
+        df.loc[24:26, "high"] = [11.2, 11.0, 11.4]
+        df.loc[24:26, "low"] = [10.7, 10.6, 10.8]
+        df.loc[24:26, "amount"] = [2000, 800, 1800]
+        fetch_daily.return_value = df
+        fetch_trade_cal.return_value = pd.DataFrame([
+            {"cal_date": "20260125", "is_open": "1"},
+            {"cal_date": "20260126", "is_open": "1"},
+            {"cal_date": "20260127", "is_open": "1"},
+        ])
+
+        result = scan_buy_points("000001.SZ", "20260125", allow_execution_check=False)
+
+        info = result["buy_points"]["买点二_主升回踩"]
+        self.assertIsNone(info["details"]["next_strength_ok"])
+        self.assertEqual(info["status"], "pending_next_day_strength" if info["setup_triggered"] else "not_triggered")
+        self.assertEqual(info["confirm_date"], "20260126")
+        self.assertEqual(info["execution_date"], "20260127")
+
     @patch("theme_trading.scanner.sell_rules.fetch_daily")
     def test_ma_break_is_diagnostic_not_must_sell(self, fetch_daily):
         fetch_daily.return_value = _daily_df([10] * 29 + [9.8])
@@ -259,7 +317,7 @@ class SignalLayeringTest(unittest.TestCase):
 
         self.assertNotIn("仅筛选出观察核心股", report["human_judgment"])
         self.assertEqual(report["watch_buy_shapes"][0]["theme_human_judgment"], ["仅筛选出观察核心股"])
-        self.assertEqual(report["executable_plans"], [])
+        self.assertEqual(report["pending_open_plans"], [])
         self.assertEqual(report["trial_plans"], [])
         self.assertEqual(len(report["watch_buy_shapes"]), 1)
         self.assertFalse(report["watch_buy_shapes"][0]["actionable"])
@@ -495,6 +553,73 @@ class SignalLayeringTest(unittest.TestCase):
         self.assertFalse(any(item.get("category") == "core_no_buy_point" for item in report["observation_pool"]))
         route_signal.assert_not_called()
 
+    @patch("theme_trading.scanner.daily_scan.scan_buy_points")
+    @patch("theme_trading.scanner.daily_scan.filter_core_stocks")
+    @patch("theme_trading.scanner.daily_scan.find_main_themes")
+    @patch("theme_trading.scanner.daily_scan.compute_market_score")
+    @patch("theme_trading.scanner.daily_scan.clear_cache")
+    def test_no_plan_diagnostics_counts_buy_point_scan_failure(self, clear_cache, compute_market_score, find_main_themes, filter_core_stocks, scan_buy_points):
+        compute_market_score.return_value = {
+            "score": 8,
+            "market_level": "strong",
+            "trade_permission": "open",
+            "index_score": 2,
+            "volume_score": 2,
+            "sentiment_score": 2,
+            "theme_score": 2,
+            "details": {},
+            "hard_rules": {"violations": []},
+            "human_judgment": [],
+        }
+        find_main_themes.return_value = {
+            "confirmed_themes": [{
+                "ts_code": "CONF",
+                "name": "高潮主线",
+                "status": "confirmed",
+                "condition_count": 4,
+                "missing_conditions": [],
+                "pct_chg": 4.5,
+                "consecutive_days": 2,
+                "amount_ratio": 2.0,
+                "up_in_sector": 9,
+            }],
+            "watch_themes": [],
+            "human_judgment": [],
+        }
+        filter_core_stocks.return_value = {
+            "confirmed_core_stocks": [{
+                "ts_code": "688820.SH",
+                "name": "核心股",
+                "sector_code": "CONF",
+                "status": "confirmed_core",
+                "pct_chg": 3.0,
+                "condition_count": 4,
+                "amount_rank": 1,
+                "sector_amount_rank": 1,
+                "turnover_rate": 8.5,
+            }],
+            "watch_core_stocks": [],
+            "human_judgment": [],
+        }
+        scan_buy_points.return_value = {"ok": False, "error": "确认日前历史数据不足"}
+
+        report = daily_scan("20260525")
+        rendered = render_daily_scan_report(report)
+
+        diagnostics = report["no_plan_diagnostics"]
+        self.assertFalse(diagnostics["has_plan"])
+        self.assertEqual(diagnostics["market_gate"], "open")
+        self.assertEqual(diagnostics["confirmed_theme_count"], 1)
+        self.assertEqual(diagnostics["confirmed_core_count"], 1)
+        self.assertEqual(diagnostics["scan_failure_count"], 1)
+        self.assertEqual(diagnostics["pending_confirmation_count"], 0)
+        self.assertIn("buy_point_scan_failed", diagnostics["reason_codes"])
+        self.assertIn("risk_notes", diagnostics["reason_codes"])
+        self.assertIn("无人工执行预案诊断", rendered)
+        self.assertIn("买点扫描失败: 1", rendered)
+        self.assertIn("确认日前历史数据不足", report["pending_confirmations"][0]["reason"])
+        self.assertNotIn("待确认 (1 项)", rendered)
+
     def test_render_shows_invalid_buy_setup_diagnostics(self):
         report = {
             "market_score": {
@@ -513,7 +638,7 @@ class SignalLayeringTest(unittest.TestCase):
             "core_stocks": {},
             "pending_confirmations": [],
             "watch_buy_shapes": [],
-            "executable_plans": [],
+            "pending_open_plans": [],
             "trial_plans": [],
             "pre_trade_checks": [],
             "blocked_reasons": [],
@@ -531,7 +656,7 @@ class SignalLayeringTest(unittest.TestCase):
                 "strength_score": 3,
                 "strength_level": "medium",
                 "strength_reasons": ["买点形态成立"],
-                "reason": "买点形态出现但执行条件已失效，不生成预案",
+                "reason": "买点形态出现但执行条件已失效，不生成人工执行预案",
             }],
         }
 
@@ -576,6 +701,158 @@ class SignalLayeringTest(unittest.TestCase):
         )
 
         self.assertEqual(report["watch_buy_shapes"], [])
+
+    def test_build_decision_plan_contains_full_snapshot_and_pending_plans(self):
+        report = {
+            "trade_date": "20260130",
+            "decision_date": "20260130",
+            "latest_complete_trade_date": "20260130",
+            "phase": "close_decision",
+            "market_score": {"score": 6},
+            "themes": {"confirmed_themes": [{"ts_code": "THEME", "name": "主线"}]},
+            "core_stocks": {"confirmed_core_stocks": [{"ts_code": "000001.SZ"}]},
+            "pending_open_plans": [{
+                "ts_code": "000001.SZ",
+                "buy_point": "买点一_放量突破",
+                "status": "pending_next_open",
+                "setup_date": "20260130",
+                "confirm_date": "20260130",
+                "execution_date": "20260202",
+                "close": 10.0,
+                "stop_loss": 9.5,
+                "execution_check": {"confirm_close": 10.0, "rule": "次日开盘价相对确认日收盘价在 ±3% 内才可进入人工执行确认窗口"},
+                "risk_budget_label": "标准",
+                "failure_signals": ["次日低开低走"],
+            }],
+            "trial_plans": [],
+        }
+
+        plan = build_decision_plan(report, created_at="2026-01-30T18:00:00")
+
+        self.assertEqual(plan["phase"], "close_decision")
+        self.assertEqual(plan["decision_date"], "20260130")
+        self.assertEqual(plan["latest_complete_trade_date"], "20260130")
+        self.assertEqual(plan["planned_execution_date"], "20260202")
+        self.assertEqual(plan["report"]["market_score"], {"score": 6})
+        self.assertEqual(plan["plans"][0]["status"], "pending_next_open")
+        self.assertEqual(plan["plans"][0]["planned_execution_date"], "20260202")
+        self.assertEqual(plan["plans"][0]["failure_signals"], ["次日低开低走"])
+
+    def test_save_plan_writes_json_snapshot(self):
+        report = {
+            "trade_date": "20260130",
+            "decision_date": "20260130",
+            "latest_complete_trade_date": "20260130",
+            "market_score": {"score": 6},
+            "pending_open_plans": [],
+            "trial_plans": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "plan.json"
+            _, path = save_decision_plan(report, output)
+            data = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["phase"], "close_decision")
+        self.assertEqual(data["report"]["market_score"]["score"], 6)
+        self.assertEqual(data["plans"], [])
+
+    @patch("theme_trading.scanner.execution.fetch_daily")
+    def test_confirm_open_does_not_mutate_plan_and_generates_confirmation(self, fetch_daily):
+        plan = {
+            "phase": "close_decision",
+            "decision_date": "20260130",
+            "latest_complete_trade_date": "20260130",
+            "planned_execution_date": "20260202",
+            "plans": [{
+                "ts_code": "000001.SZ",
+                "name": "测试股",
+                "buy_point": "买点一_放量突破",
+                "plan_type": "standard",
+                "status": "pending_next_open",
+                "setup_date": "20260130",
+                "confirm_date": "20260130",
+                "planned_execution_date": "20260202",
+                "close": 10.0,
+                "stop_loss": 9.5,
+            }],
+        }
+        original = json.loads(json.dumps(plan, ensure_ascii=False))
+        fetch_daily.return_value = pd.DataFrame([{
+            "ts_code": "000001.SZ",
+            "trade_date": "20260202",
+            "open": 10.2,
+            "high": 10.5,
+            "low": 10.1,
+            "close": 10.4,
+        }])
+
+        confirmation = build_execution_confirmation(plan, plan_path="plans/20260130.json", created_at="2026-02-02T09:31:00")
+
+        self.assertEqual(plan, original)
+        self.assertEqual(confirmation["phase"], "open_execution_confirmation")
+        self.assertEqual(confirmation["results"][0]["status"], "executable_plan")
+        self.assertEqual(confirmation["results"][0]["open"], 10.2)
+        self.assertTrue(confirmation["results"][0]["execution_check"]["gap_check"]["passed"])
+        self.assertEqual(confirmation["summary"]["executable"], 1)
+
+    def test_render_distinguishes_pending_plan_and_confirmed_execution(self):
+        report = {
+            "market_score": {
+                "score": 6,
+                "market_level": "medium",
+                "trade_permission": "open",
+                "index_score": 1,
+                "volume_score": 1,
+                "sentiment_score": 2,
+                "theme_score": 2,
+                "details": {},
+                "hard_rules": {"violations": []},
+                "human_judgment": [],
+            },
+            "themes": {},
+            "core_stocks": {},
+            "pending_confirmations": [],
+            "watch_buy_shapes": [],
+            "pending_open_plans": [{
+                "ts_code": "000001.SZ",
+                "buy_point": "买点一_放量突破",
+                "status": "pending_next_open",
+                "setup_date": "20260130",
+                "confirm_date": "20260130",
+                "planned_execution_date": "20260202",
+                "close": 10.0,
+                "stop_loss": 9.5,
+                "execution_check": {"rule": "次日开盘价相对确认日收盘价在 ±3% 内才可进入人工执行确认窗口"},
+            }],
+            "trial_plans": [],
+            "pre_trade_checks": [],
+            "blocked_reasons": [],
+            "data_warnings": [],
+            "human_judgment": [],
+            "observation_pool": [],
+        }
+        rendered_report = render_daily_scan_report(report)
+        confirmation = {
+            "plan_path": "plans/20260130.json",
+            "decision_date": "20260130",
+            "execution_date": "20260202",
+            "summary": {"total": 1, "executable": 1, "skipped": 0, "invalid": 0},
+            "results": [{
+                "ts_code": "000001.SZ",
+                "buy_point": "买点一_放量突破",
+                "status": "executable_plan",
+                "open": 10.2,
+                "reason": "已通过开盘偏离确认，可进入人工执行窗口",
+                "execution_check": {"gap_check": {"gap_pct": 0.02}},
+            }],
+        }
+        rendered_confirmation = render_execution_confirmation(confirmation)
+
+        self.assertIn("待开盘确认预案", rendered_report)
+        self.assertIn("待人工执行确认", rendered_report)
+        self.assertIn("计划确认日 20260202", rendered_report)
+        self.assertIn("已通过确认，可人工执行", rendered_confirmation)
+        self.assertIn("开盘执行确认结果", rendered_confirmation)
 
 
 if __name__ == "__main__":
